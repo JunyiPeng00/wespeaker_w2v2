@@ -202,9 +202,15 @@ def train(config='conf/config.yaml', **kwargs):
     # adjusted according to the batchsize and world_size used in different setup
     configs['scheduler_args']['scale_ratio'] = 1.0 * world_size * configs[
         'dataloader_args']['batch_size'] / 64
-    scheduler = getattr(schedulers,
-                        configs['scheduler'])(optimizer,
-                                              **configs['scheduler_args'])
+    scheduler_class = getattr(schedulers, configs['scheduler'])
+    if isinstance(scheduler_class, type) and issubclass(
+            scheduler_class, schedulers.BaseClass):
+        # BaseClass schedulers need the unwrapped model to map optimizer
+        # params to names for differential frontend lr (frontend_lr_ratio).
+        scheduler = scheduler_class(optimizer, model=model,
+                                    **configs['scheduler_args'])
+    else:
+        scheduler = scheduler_class(optimizer, **configs['scheduler_args'])
     if rank == 0:
         logger.info("<== Scheduler ==>")
         logger.info("scheduler is: " + configs['scheduler'])

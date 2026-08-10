@@ -257,11 +257,19 @@ class BaseClass:
                  final_lr,
                  warm_up_epoch=6,
                  scale_ratio=1.0,
-                 warm_from_zero=False):
+                 warm_from_zero=False,
+                 frontend_modules=None,
+                 frontend_lr_ratio=1.0,
+                 model=None):
         '''
         warm_up_epoch: the first warm_up_epoch is the multiprocess warm-up stage
         scale_ratio: multiplied to the current lr in the multiprocess training
         process
+        frontend_modules / frontend_lr_ratio: parameters whose names start with
+        one of frontend_modules get lr * frontend_lr_ratio (e.g. 0.1 for a
+        pretrained SSL frontend). Requires `model` (the unwrapped model, not
+        the DDP wrapper) to map optimizer params back to their names; without
+        `model`, differential lr is not applied.
         '''
         self.optimizer = optimizer
         self.max_iter = num_epochs * epoch_iter
@@ -271,6 +279,63 @@ class BaseClass:
         self.current_iter = 0
         self.warm_up_iter = warm_up_epoch * epoch_iter
         self.warm_from_zero = warm_from_zero
+        self.frontend_lr_ratio = frontend_lr_ratio
+        if frontend_modules is None:
+            self.frontend_modules = ['frontend']
+        elif isinstance(frontend_modules, str):
+            self.frontend_modules = [frontend_modules]
+        else:
+            self.frontend_modules = list(frontend_modules)
+        self._param_id_to_name = {}
+        if model is not None:
+            for name, param in model.named_parameters():
+                self._param_id_to_name[id(param)] = name
+        self._auto_restructure_optimizer()
+        self._identify_frontend_param_groups()
+
+    def _is_frontend_name(self, param_name):
+        return any(
+            param_name.startswith(keyword + '.')
+            for keyword in self.frontend_modules)
+
+    def _auto_restructure_optimizer(self):
+        # Split a single param group into frontend/backend groups so that
+        # set_lr() can apply frontend_lr_ratio. No-op unless the optimizer
+        # has exactly one group and param names are known (model was given).
+        if len(self.optimizer.param_groups) != 1 or not self._param_id_to_name:
+            return
+        original_group = self.optimizer.param_groups[0]
+        frontend_params, backend_params = [], []
+        for param in original_group['params']:
+            name = self._param_id_to_name.get(id(param), '')
+            if self._is_frontend_name(name):
+                frontend_params.append(param)
+            else:
+                backend_params.append(param)
+        if frontend_params and backend_params:
+            frontend_group = {
+                k: v for k, v in original_group.items() if k != 'params'}
+            frontend_group['params'] = frontend_params
+            backend_group = {
+                k: v for k, v in original_group.items() if k != 'params'}
+            backend_group['params'] = backend_params
+            self.optimizer.param_groups = [frontend_group, backend_group]
+
+    def _identify_frontend_param_groups(self):
+        # Tag each param group with an internal _is_frontend flag, either via
+        # an explicit 'name' field or via the name of its first parameter.
+        for param_group in self.optimizer.param_groups:
+            is_frontend = False
+            if 'name' in param_group:
+                is_frontend = param_group['name'] in self.frontend_modules
+            else:
+                params = param_group.get('params', [])
+                if params:
+                    first_param = params[0] if isinstance(params, list) \
+                        else next(iter(params))
+                    name = self._param_id_to_name.get(id(first_param), '')
+                    is_frontend = self._is_frontend_name(name)
+            param_group['_is_frontend'] = is_frontend
 
     def get_multi_process_coeff(self):
         lr_coeff = 1.0 * self.scale_ratio
@@ -295,7 +360,10 @@ class BaseClass:
     def set_lr(self):
         current_lr = self.get_current_lr()
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = current_lr
+            if param_group.get('_is_frontend', False):
+                param_group['lr'] = current_lr * self.frontend_lr_ratio
+            else:
+                param_group['lr'] = current_lr
 
     def step(self, current_iter=None):
         if current_iter is not None:
@@ -324,9 +392,11 @@ class ExponentialDecrease(BaseClass):
                  final_lr,
                  warm_up_epoch=6,
                  scale_ratio=1.0,
-                 warm_from_zero=False):
+                 warm_from_zero=False,
+                 **kwargs):
         super().__init__(optimizer, num_epochs, epoch_iter, initial_lr,
-                         final_lr, warm_up_epoch, scale_ratio, warm_from_zero)
+                         final_lr, warm_up_epoch, scale_ratio, warm_from_zero,
+                         **kwargs)
 
     def get_current_lr(self):
         lr_coeff = self.get_multi_process_coeff()
@@ -350,9 +420,10 @@ class TriAngular2(BaseClass):
                  warm_up_epoch=6,
                  scale_ratio=1.0,
                  cycle_step=2,
-                 reduce_lr_diff_ratio=0.5):
+                 reduce_lr_diff_ratio=0.5,
+                 **kwargs):
         super().__init__(optimizer, num_epochs, epoch_iter, initial_lr,
-                         final_lr, warm_up_epoch, scale_ratio)
+                         final_lr, warm_up_epoch, scale_ratio, **kwargs)
 
         self.reduce_lr_diff_ratio = reduce_lr_diff_ratio
         self.cycle_iter = cycle_step * epoch_iter

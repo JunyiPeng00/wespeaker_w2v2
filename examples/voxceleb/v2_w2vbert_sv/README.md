@@ -7,6 +7,8 @@ This example integrates the custom W2V-BERT 2.0 SV stack into mainline WeSpeaker
 | `wespeaker/frontend/__init__.py` | Registers frontend key **`w2vbert_sv`** (lazy import); guards optional `s3prl` / `whisper` imports |
 | `wespeaker/models/ssl_backend/` | `SSL_BACKEND_MHFA` / `SSL_BACKEND_MHFA_LayerNorm` backends |
 | `wespeaker/models/speaker_model.py` | Dispatches `SSL_BACKEND*` model names |
+| `wespeaker/utils/schedulers.py` | BaseClass schedulers support `frontend_modules` / `frontend_lr_ratio` (differential frontend lr) |
+| `wespeaker/bin/train.py` | Passes the model to BaseClass schedulers so the differential lr actually applies |
 
 Note: the frontend key is `w2vbert_sv`, NOT `w2vbert` — the upstream `w2vbert`
 key is the LoRA-adapter variant from wespeaker PR #439. Configs written for the
@@ -21,6 +23,24 @@ original recipe (`frontend: w2vbert`, `w2vbert_args:`) must be renamed to
 ├── mhfa_W2VB_ft_v5/models/avg_model.pt   # fine-tuned checkpoint (vox2_dev, 3 ep)
 └── mhfa_W2VB_ft_v5/embeddings/       # reference vox1/vox2_dev embeddings
 ```
+
+## Two-stage training (vox2_dev recipe)
+
+`conf/w2vbert_sv_mhfa_stage1_frozen.yaml` (frozen frontend, 15 ep) and
+`conf/w2vbert_sv_mhfa_stage2_ft.yaml` (full fine-tune, 3 ep) are the ported
+original recipe two-stage configs. Handoff between stages as in the original
+recipe: copy stage-1 `models/avg_model.pt` to stage-2 `models/model_0.pt` and
+launch stage-2 training with `--checkpoint <stage2_exp>/models/model_0.pt`.
+Data args (`--train_data raw.list --train_label utt2spk --reverb_data
+--noise_data`) go on the command line; this repo reads raw wavs from disk
+(the recipe's `train_lmdb` raw-audio-from-LMDB extension is not ported, and
+the original original recipe `data/vox2_dev/` lists no longer exist — rebuild from
+`spktag/dataset/lmdb/wespeaker_vbclean_vox2dev.lmdb` + `vox2_wav.scp` if
+needed).
+
+Caveat discovered while porting: in the original original recipe runs the
+Note: the released checkpoints were trained with `frontend_lr_ratio: 0.1`
+(frontend lr = 0.1 x backend lr); keep this setting to reproduce them.
 
 ## Extract embeddings
 
