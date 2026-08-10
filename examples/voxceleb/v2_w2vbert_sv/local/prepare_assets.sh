@@ -64,7 +64,7 @@ if [ ! -f data/vox1/trials/vox1_O_cleaned.kaldi ]; then
   for pair in "veri_test2.txt vox1_O" "list_test_all2.txt vox1_E" \
               "list_test_hard2.txt vox1_H"; do
     set -- $pair
-    wget -q --no-check-certificate "${meta}/$1" -O "data/vox1/trials/$2.txt"
+    python -c "import urllib.request; urllib.request.urlretrieve('${meta}/$1', 'data/vox1/trials/$2.txt')"
     awk '{if($1==0)label="nontarget";else{label="target"}; print $2,$3,label}' \
       "data/vox1/trials/$2.txt" > "data/vox1/trials/${2}_cleaned.kaldi"
   done
