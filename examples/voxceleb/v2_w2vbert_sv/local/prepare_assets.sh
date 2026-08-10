@@ -54,3 +54,19 @@ EOF
 else
   echo "CKPT_REPO empty: skip checkpoint (train your own via run.sh stages 1-4)"
 fi
+
+# Official VoxCeleb1 trial lists (needed by the scoring stage; same source
+# and conversion as examples/voxceleb/v2/local/prepare_data.sh).
+if [ ! -f data/vox1/trials/vox1_O_cleaned.kaldi ]; then
+  echo "Downloading official VoxCeleb1 trial lists ..."
+  mkdir -p data/vox1/trials
+  meta=https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta
+  for pair in "veri_test2.txt vox1_O" "list_test_all2.txt vox1_E" \
+              "list_test_hard2.txt vox1_H"; do
+    set -- $pair
+    wget -q --no-check-certificate "${meta}/$1" -O "data/vox1/trials/$2.txt"
+    awk '{if($1==0)label="nontarget";else{label="target"}; print $2,$3,label}' \
+      "data/vox1/trials/$2.txt" > "data/vox1/trials/${2}_cleaned.kaldi"
+  done
+fi
+echo "Trials ready: data/vox1/trials"
