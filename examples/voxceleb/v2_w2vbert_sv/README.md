@@ -1,5 +1,20 @@
 # W2V-BERT 2.0 + MHFA speaker verification
 
+## Quick start
+
+```bash
+cd examples/voxceleb/v2_w2vbert_sv
+bash run.sh --stage 1 --stop_stage 2   # stage-1: frozen-frontend training + model average
+bash run.sh --stage 3 --stop_stage 4   # stage-2: full fine-tuning + model average
+bash run.sh --stage 5 --stop_stage 6   # extract vox2_dev+vox1 embeddings, score vox1-O/E/H
+```
+
+With VoxCeleb wavs on disk, pass `--use_lmdb false --data <your_data_dir>`
+(standard WeSpeaker `raw.list`/`utt2spk` layout, plus musan/rirs LMDBs).
+`use_lmdb=true` (default) instead reads raw audio from `<set>/lmdb`
+directories keyed by the raw.list `wav` value. On a cluster, wrap `run.sh`
+in your scheduler submission script of choice.
+
 This example integrates the custom W2V-BERT 2.0 SV stack into mainline WeSpeaker with minimal changes:
 
 | Added / changed | What |

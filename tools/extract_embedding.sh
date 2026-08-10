@@ -59,7 +59,7 @@ for suffix in $(seq 0 $(($nj - 1))); do
     --num-workers ${num_workers} \
     --reverb_data ${reverb_data} \
     --noise_data ${noise_data} \
-    ${data_lmdb:+--train_lmdb ${data_lmdb}} \
+    --train_lmdb="${data_lmdb}" \
     --aug-prob ${aug_prob} \
     >${log_dir}/split_${suffix}.log 2>&1 &
 done
