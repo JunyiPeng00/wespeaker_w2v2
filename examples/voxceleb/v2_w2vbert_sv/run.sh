@@ -19,7 +19,7 @@
 stage=-1
 stop_stage=-1
 
-data=<path> original/examples/voxceleb/v4/data
+data=data
 data_type="raw"
 use_lmdb=true  # read raw audio from ${data}/<set>/lmdb instead of the disk
 

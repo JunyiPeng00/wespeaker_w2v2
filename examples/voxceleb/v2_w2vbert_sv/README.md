@@ -1,21 +1,64 @@
 # W2V-BERT 2.0 + MHFA speaker verification
 
+Self-contained recipe: model weights live in `assets/`, data lists + LMDB
+links in `data/` (both git-ignored — see layout below), all stage logic in
+`run.sh`. On a machine where `assets/` and `data/` are populated, everything
+below works as-is.
+
 ## Quick start
 
 ```bash
 cd examples/voxceleb/v2_w2vbert_sv
-bash run.sh --stage 1 --stop_stage 2   # stage-1: frozen-frontend training + model average
-bash run.sh --stage 3 --stop_stage 4   # stage-2: full fine-tuning + model average
-bash run.sh --stage 5 --stop_stage 6   # extract vox2_dev+vox1 embeddings, score vox1-O/E/H
+
+# (a) score the shipped reference embeddings (no GPU, minutes)
+bash run.sh --stage 6 --stop_stage 6 --stage2_exp assets/mhfa_W2VB_ft_v5
+
+# (b) evaluate the shipped fine-tuned checkpoint from scratch (GPU)
+bash run.sh --stage 5 --stop_stage 6 --stage2_exp assets/mhfa_W2VB_ft_v5
+
+# (c) full two-stage training (GPU, multi-day)
+bash run.sh --stage 1 --stop_stage 2   # stage-1: frozen-frontend training + average
+bash run.sh --stage 3 --stop_stage 4   # stage-2: full fine-tuning + average
+bash run.sh --stage 5 --stop_stage 6   # extract embeddings + score vox1-O/E/H
 ```
 
-With VoxCeleb wavs on disk, pass `--use_lmdb false --data <your_data_dir>`
-(standard WeSpeaker `raw.list`/`utt2spk` layout, plus musan/rirs LMDBs).
-`use_lmdb=true` (default) instead reads raw audio from `<set>/lmdb`
-directories keyed by the raw.list `wav` value. On a cluster, wrap `run.sh`
-in your scheduler submission script of choice.
+`use_lmdb=true` (default) reads raw audio from the `data/<set>/lmdb` links;
+with VoxCeleb wavs on disk pass `--use_lmdb false --data <your_data_dir>`
+(standard WeSpeaker `raw.list`/`utt2spk` layout). On a cluster, wrap `run.sh`
+in your scheduler submission script.
 
-This example integrates the custom W2V-BERT 2.0 SV stack into mainline WeSpeaker with minimal changes:
+## Results (shipped mhfa_W2VB_ft_v5 checkpoint, cosine + mean-norm)
+
+| Trials | EER (%) | minDCF (p=0.01) |
+|---|---|---|
+| vox1-O cleaned | 0.207 | 0.019 |
+| vox1-E cleaned | 0.377 | 0.036 |
+| vox1-H cleaned | 0.756 | 0.072 |
+
+Reproduced 2026-08-10 with quick-start command (a) on the shipped reference
+embeddings.
+
+## Layout of the git-ignored resources
+
+```
+assets/
+├── w2v-bert-2.0/                 # base model: config_baseline.json + model.safetensors
+└── mhfa_W2VB_ft_v5/              # released two-stage result (vox2_dev, 3 ep ft)
+    ├── config.yaml               # inference config (this repo's format)
+    ├── models/avg_model.pt
+    └── embeddings/{vox1,vox2_dev}  # reference embeddings (scp+ark)
+data/
+├── vox2_dev/  raw.list utt2spk wav.scp spk2utt  lmdb -> <fast storage>/wespeaker_vbclean_vox2dev.lmdb
+├── vox1/      raw.list utt2spk wav.scp spk2utt trials/  lmdb -> <fast storage>/wespeaker_vox1.lmdb
+├── musan/     lmdb -> (musan aug lmdb)
+└── rirs/      lmdb -> (rirs aug lmdb)
+```
+
+The LMDBs map the raw.list `wav` value (original absolute wav path) to the
+wav bytes; `raw.list`/`utt2spk` are standard WeSpeaker JSON-lines/kaldi
+formats, so the same recipe runs anywhere by regenerating this layout.
+
+## What was integrated into wespeaker (minimal diff to upstream)
 
 | Added / changed | What |
 |---|---|
@@ -26,65 +69,25 @@ This example integrates the custom W2V-BERT 2.0 SV stack into mainline WeSpeaker
 | `wespeaker/bin/train.py` | Passes the model to BaseClass schedulers so the differential lr actually applies |
 | `wespeaker/dataset/` + bin + `tools/extract_embedding.sh` | Optional `train_lmdb` (raw audio from LMDB, keyed by the raw.list `wav` field); default behavior unchanged |
 
-Note: the frontend key is `w2vbert_sv`, NOT `w2vbert` — the upstream `w2vbert`
-key is the LoRA-adapter variant from wespeaker PR #439. Configs written for the
-original recipe (`frontend: w2vbert`, `w2vbert_args:`) must be renamed to
-`frontend: w2vbert_sv`, `w2vbert_sv_args:` (see `conf/w2vbert_sv_mhfa.yaml`).
+Note: the frontend key is `w2vbert_sv`, NOT `w2vbert` — the upstream
+`w2vbert` key is the LoRA-adapter variant from wespeaker PR #439. Configs
+written for the original recipe (`frontend: w2vbert`, `w2vbert_args:`) must
+be renamed accordingly (see `conf/`). Training is launched via
+`python -m torch.distributed.run` (not the `torchrun` binary) so worker
+processes inherit the active interpreter in venv-over-conda containers.
 
-## Assets (the cluster paths, not in git)
-
-```
-<path>
-├── convert_w2vbert/w2v-bert-2.0/     # base model (config_baseline.json + model.safetensors)
-├── mhfa_W2VB_ft_v5/models/avg_model.pt   # fine-tuned checkpoint (vox2_dev, 3 ep)
-└── mhfa_W2VB_ft_v5/embeddings/       # reference vox1/vox2_dev embeddings
-```
-
-## Two-stage training (vox2_dev recipe)
-
-`conf/w2vbert_sv_mhfa_stage1_frozen.yaml` (frozen frontend, 15 ep) and
-`conf/w2vbert_sv_mhfa_stage2_ft.yaml` (full fine-tune, 3 ep) are the ported
-original recipe two-stage configs. Handoff between stages as in the original
-recipe: copy stage-1 `models/avg_model.pt` to stage-2 `models/model_0.pt` and
-launch stage-2 training with `--checkpoint <stage2_exp>/models/model_0.pt`.
-Data args (`--train_data raw.list --train_label utt2spk --reverb_data
---noise_data`) go on the command line. Raw audio can come from disk (default)
-or from an LMDB via the optional `--train_lmdb <lmdb_dir>` (the LMDB maps the
-raw.list `wav` value to the original wav bytes; also available in
-`tools/extract_embedding.sh` as `--data_lmdb`). A complete, still-alive
-vox2_dev data dir (raw.list + utt2spk + lmdb, 1,092,009 utts, plus
-musan/rirs lmdb) lives at
-`<path> original/examples/voxceleb/v4/data/`.
-
-Caveat discovered while porting: in the original original recipe runs the
 Note: the released checkpoints were trained with `frontend_lr_ratio: 0.1`
 (frontend lr = 0.1 x backend lr); keep this setting to reproduce them.
 
-## Extract embeddings
+## Equivalence to the original recipe
+
+Verified 2026-08-10 (PyTorch 2.6.0 rocm container, MI250X, fp32): the
+checkpoint loads with 0 missing / 0 unexpected keys; 16 vox1 utterances
+(12 dev + 4 test) extracted through this repo match the reference arks with
+worst-case relative diff 2.9e-06 and cosine 1.00000000, identically via the
+disk and LMDB input paths. Check any new extraction against the reference:
 
 ```bash
-export PYTHONPATH=$REPO:$REPO/.deps   # .deps: silero-vad/fire/onnxruntime etc. (pip install --no-deps --target .deps)
-python wespeaker/bin/extract.py \
-  --config examples/voxceleb/v2_w2vbert_sv/conf/w2vbert_sv_mhfa.yaml \
-  --model_path .../mhfa_W2VB_ft_v5/models/avg_model.pt \
-  --data_type raw --data_list raw.list \
-  --embed_ark xvector.ark --batch_size 1 --num_workers 2
+python local/compare_embeddings.py \
+  <new_xvector.scp> assets/mhfa_W2VB_ft_v5/embeddings/vox1/xvector.scp
 ```
-
-`raw.list` is standard WeSpeaker JSON-lines: `{"key": ..., "spk": ..., "wav": ...}`.
-
-## Equivalence check against the original recipe
-
-`local/compare_embeddings.py` compares a freshly extracted scp/ark against the
-reference embeddings shipped with the checkpoint:
-
-```bash
-python examples/voxceleb/v2_w2vbert_sv/local/compare_embeddings.py \
-  new_xvector.scp .../mhfa_W2VB_ft_v5/embeddings/vox1/xvector.scp
-```
-
-Verified 2026-08-10 on the cluster (PyTorch 2.6.0 rocm-6.2.4 container, an AMD GPU node MI250X):
-16 vox1 utterances (12 dev + 4 test), checkpoint loads with 0 missing /
-0 unexpected keys; extracted embeddings match the reference arks with
-worst-case relative diff 2.9e-06 and cosine 1.00000000 (float32 GPU
-reproducibility level).

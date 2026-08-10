@@ -49,3 +49,6 @@ s3prl_hub
 whisper_hub
 .deps/
 examples/voxceleb/v2_w2vbert_sv/logs/
+examples/voxceleb/v2_w2vbert_sv/assets/
+examples/voxceleb/v2_w2vbert_sv/data/
+examples/voxceleb/v2_w2vbert_sv/exp/

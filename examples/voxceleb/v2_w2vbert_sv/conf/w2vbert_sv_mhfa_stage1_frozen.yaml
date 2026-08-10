@@ -2,7 +2,8 @@
 ### Ported from the original recipe with two changes:
 ###   - frontend key renamed w2vbert -> w2vbert_sv (upstream 'w2vbert' is the
 ###     LoRA-adapter variant with a different constructor)
-###   - path_or_url made absolute
+###   - path_or_url points at assets/w2v-bert-2.0 (relative to this example
+###     dir, where run.sh is launched from)
 ### Data args (train_data/train_label/noise_data/reverb_data) are passed on
 ### the command line as usual; add --train_lmdb <lmdb_dir> to read raw audio
 ### from an LMDB (keyed by the raw.list "wav" value) instead of the disk.

@@ -4,4 +4,4 @@ export PATH=$PWD:$PATH
 export PYTHONIOENCODING=UTF-8
 # .deps holds optional pip packages (silero-vad/fire/onnxruntime/...) installed
 # with: pip install --no-deps --target ../../../.deps <pkg>
-export PYTHONPATH=../../../:../../../.deps:$PYTHONPATH
+export PYTHONPATH=../../../:../../../.deps:${PYTHONPATH:-}

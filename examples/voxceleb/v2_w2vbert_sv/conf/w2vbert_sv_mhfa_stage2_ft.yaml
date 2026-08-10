@@ -1,6 +1,6 @@
 ### Stage-2 training config: full fine-tuning of W2V-BERT 2.0 + MHFA.
 ### Ported from the original recipe, with the same two changes as stage-1
-### (w2vbert -> w2vbert_sv key rename, absolute path_or_url).
+### (w2vbert -> w2vbert_sv key rename, assets/ path_or_url).
 ###
 ### Stage handoff (as in the original recipe):
 ###   cp <stage1_exp>/models/avg_model.pt <stage2_exp>/models/model_0.pt
