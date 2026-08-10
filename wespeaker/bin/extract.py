@@ -95,7 +95,8 @@ def extract(config='conf/config.yaml', **kwargs):
                       whole_utt=(batch_size == 1),
                       reverb_lmdb_file=configs.get('reverb_data', None),
                       noise_lmdb_file=configs.get('noise_data', None),
-                      repeat_dataset=False)
+                      repeat_dataset=False,
+                      train_lmdb_file=configs.get('train_lmdb', None))
     dataloader = DataLoader(dataset,
                             shuffle=False,
                             batch_size=batch_size,

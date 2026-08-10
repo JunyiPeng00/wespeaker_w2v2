@@ -9,6 +9,7 @@ This example integrates the custom W2V-BERT 2.0 SV stack into mainline WeSpeaker
 | `wespeaker/models/speaker_model.py` | Dispatches `SSL_BACKEND*` model names |
 | `wespeaker/utils/schedulers.py` | BaseClass schedulers support `frontend_modules` / `frontend_lr_ratio` (differential frontend lr) |
 | `wespeaker/bin/train.py` | Passes the model to BaseClass schedulers so the differential lr actually applies |
+| `wespeaker/dataset/` + bin + `tools/extract_embedding.sh` | Optional `train_lmdb` (raw audio from LMDB, keyed by the raw.list `wav` field); default behavior unchanged |
 
 Note: the frontend key is `w2vbert_sv`, NOT `w2vbert` — the upstream `w2vbert`
 key is the LoRA-adapter variant from wespeaker PR #439. Configs written for the
@@ -32,11 +33,13 @@ original recipe two-stage configs. Handoff between stages as in the original
 recipe: copy stage-1 `models/avg_model.pt` to stage-2 `models/model_0.pt` and
 launch stage-2 training with `--checkpoint <stage2_exp>/models/model_0.pt`.
 Data args (`--train_data raw.list --train_label utt2spk --reverb_data
---noise_data`) go on the command line; this repo reads raw wavs from disk
-(the recipe's `train_lmdb` raw-audio-from-LMDB extension is not ported, and
-the original original recipe `data/vox2_dev/` lists no longer exist — rebuild from
-`spktag/dataset/lmdb/wespeaker_vbclean_vox2dev.lmdb` + `vox2_wav.scp` if
-needed).
+--noise_data`) go on the command line. Raw audio can come from disk (default)
+or from an LMDB via the optional `--train_lmdb <lmdb_dir>` (the LMDB maps the
+raw.list `wav` value to the original wav bytes; also available in
+`tools/extract_embedding.sh` as `--data_lmdb`). A complete, still-alive
+vox2_dev data dir (raw.list + utt2spk + lmdb, 1,092,009 utts, plus
+musan/rirs lmdb) lives at
+`<path> original/examples/voxceleb/v4/data/`.
 
 Caveat discovered while porting: in the original original recipe runs the
 Note: the released checkpoints were trained with `frontend_lr_ratio: 0.1`

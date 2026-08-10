@@ -93,7 +93,8 @@ def train(config='conf/config.yaml', **kwargs):
                             configs['dataset_args'],
                             spk2id_dict,
                             reverb_lmdb_file=configs.get('reverb_data', None),
-                            noise_lmdb_file=configs.get('noise_data', None))
+                            noise_lmdb_file=configs.get('noise_data', None),
+                            train_lmdb_file=configs.get('train_lmdb', None))
     train_dataloader = DataLoader(train_dataset, **configs['dataloader_args'])
     batch_size = configs['dataloader_args']['batch_size']
     if configs['dataset_args'].get('sample_num_per_epoch', 0) > 0:

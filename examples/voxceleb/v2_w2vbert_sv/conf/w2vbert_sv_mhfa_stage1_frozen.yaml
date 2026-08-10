@@ -4,8 +4,8 @@
 ###     LoRA-adapter variant with a different constructor)
 ###   - path_or_url made absolute
 ### Data args (train_data/train_label/noise_data/reverb_data) are passed on
-### the command line as usual. NOTE: this repo reads raw wavs from disk; the
-### original recipe's train_lmdb (raw audio from LMDB) is not ported.
+### the command line as usual; add --train_lmdb <lmdb_dir> to read raw audio
+### from an LMDB (keyed by the raw.list "wav" value) instead of the disk.
 
 exp_dir: exp/v2_w2vbert_sv/stage1_frozen
 gpus: "[0,1,2,3,4,5,6,7]"

@@ -26,6 +26,7 @@ num_workers=1
 nj=4
 reverb_data=data/rirs/lmdb
 noise_data=data/musan/lmdb
+data_lmdb=  # optional: lmdb with raw audio keyed by the raw.list "wav" field
 aug_prob=0.0
 gpus="[0,1]"
 
@@ -58,6 +59,7 @@ for suffix in $(seq 0 $(($nj - 1))); do
     --num-workers ${num_workers} \
     --reverb_data ${reverb_data} \
     --noise_data ${noise_data} \
+    ${data_lmdb:+--train_lmdb ${data_lmdb}} \
     --aug-prob ${aug_prob} \
     >${log_dir}/split_${suffix}.log 2>&1 &
 done

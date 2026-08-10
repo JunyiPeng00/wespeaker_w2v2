@@ -116,18 +116,29 @@ def tar_file_and_group(data):
         sample['stream'].close()
 
 
-def parse_raw(data):
+def parse_raw(data, lmdb_file_path=None):
     """ Parse key/wav/spk from json line
 
         Args:
             data: Iterable[str], str is a json line has key/wav/spk
+            lmdb_file_path: optional path to an LMDB holding the raw audio
+                bytes keyed by the json line's "wav" value; when given, audio
+                is read from the LMDB instead of the filesystem
 
         Returns:
             Iterable[{key, wav, spk, sample_rate}]
     """
+    if lmdb_file_path is not None:
+        import lmdb  # optional dependency, only needed for LMDB reading
 
     def read_audio(wav):
-        if wav.endswith('|'):
+        if lmdb_file_path is not None:
+            with lmdb.open(lmdb_file_path, readonly=True, lock=False) as env:
+                with env.begin() as txn:
+                    raw_bytes = txn.get(wav.encode())
+                    waveform, sample_rate = torchaudio.load(
+                        io.BytesIO(raw_bytes))
+        elif wav.endswith('|'):
             p = Popen(wav[:-1], shell=True, stdout=PIPE)
             data = p.stdout.read()
             waveform, sample_rate = torchaudio.load(io.BytesIO(data))

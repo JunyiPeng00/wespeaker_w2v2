@@ -140,7 +140,8 @@ def Dataset(data_type,
             whole_utt=False,
             reverb_lmdb_file=None,
             noise_lmdb_file=None,
-            repeat_dataset=True):
+            repeat_dataset=True,
+            train_lmdb_file=None):
     """ Construct dataset from arguments
 
         We have two shuffle stage in the Dataset. The first is global
@@ -156,6 +157,8 @@ def Dataset(data_type,
             noise_lmdb_file: noise data source lmdb file
             whole_utt: use whole utt or random chunk
             repeat_dataset: True for training while False for testing
+            train_lmdb_file: optional lmdb with raw audio bytes keyed by the
+                "wav" field of the raw data list (raw data_type only)
     """
     assert data_type in ['shard', 'raw', 'feat']
     frontend_type = configs.get('frontend', 'fbank')
@@ -188,7 +191,8 @@ def Dataset(data_type,
         dataset = Processor(dataset, processor.url_opener)
         dataset = Processor(dataset, processor.tar_file_and_group)
     elif data_type == 'raw':
-        dataset = Processor(dataset, processor.parse_raw)
+        dataset = Processor(dataset, processor.parse_raw,
+                            lmdb_file_path=train_lmdb_file)
     else:
         dataset = Processor(dataset, processor.parse_feat)
 
