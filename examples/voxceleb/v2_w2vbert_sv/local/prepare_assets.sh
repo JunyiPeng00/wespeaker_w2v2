@@ -4,17 +4,19 @@
 #
 # Recreate assets/ from public sources (run from the example dir).
 #
-#   bash local/prepare_assets.sh                       # base model only
-#   CKPT_REPO=<hf_repo_id> bash local/prepare_assets.sh  # + fine-tuned checkpoint
+#   bash local/prepare_assets.sh            # base model + released checkpoint
+#   CKPT_REPO= bash local/prepare_assets.sh # base model only (skip checkpoint)
 #
-# The base model is the official facebook/w2v-bert-2.0 (the local
-# model.safetensors must hash to sha256 eb890c9660ed6e34...93be043);
-# config_baseline.json only ADDS pruning fields on top of the official
-# config.json and ships in conf/. The fine-tuned mhfa_W2VB_ft_v5 checkpoint
-# is a training artifact: download it from CKPT_REPO if provided, otherwise
-# reproduce it with the two-stage training (run.sh stages 1-4).
+# Base model: official facebook/w2v-bert-2.0 (this recipe's copy is
+# bit-identical, sha256 eb890c96...); conf/config_baseline.json only ADDS
+# pruning fields on top of the official config.json and ships in git.
+# Released checkpoint: JYP2024/wespeaker-mhfa-W2VB-ft-v2 — a full exp upload
+# (avg_model.pt + vox1/vox2_dev reference embeddings), public on the HF Hub.
 
 set -euo pipefail
+
+CKPT_REPO=${CKPT_REPO-JYP2024/wespeaker-mhfa-W2VB-ft-v2}
+CKPT_DIR=${CKPT_DIR:-assets/mhfa_W2VB_ft_v2}
 
 mkdir -p assets/w2v-bert-2.0
 
@@ -33,17 +35,22 @@ fi
 cp conf/config_baseline.json assets/w2v-bert-2.0/config_baseline.json
 echo "Base model ready: assets/w2v-bert-2.0"
 
-if [ -n "${CKPT_REPO:-}" ]; then
-  echo "Downloading fine-tuned checkpoint from ${CKPT_REPO} ..."
-  mkdir -p assets/mhfa_W2VB_ft_v5/models
+if [ -n "${CKPT_REPO}" ]; then
+  echo "Downloading released checkpoint + reference embeddings from ${CKPT_REPO} ..."
   python - <<EOF
-from huggingface_hub import hf_hub_download
-import shutil
-p = hf_hub_download('${CKPT_REPO}', 'avg_model.pt')
-shutil.copy(p, 'assets/mhfa_W2VB_ft_v5/models/avg_model.pt')
+from huggingface_hub import snapshot_download
+snapshot_download('${CKPT_REPO}', local_dir='${CKPT_DIR}',
+                  allow_patterns=['models/avg_model.pt', 'embeddings/*'])
 EOF
-  cp conf/w2vbert_sv_mhfa.yaml assets/mhfa_W2VB_ft_v5/config.yaml
-  echo "Checkpoint ready: assets/mhfa_W2VB_ft_v5"
+  # Reference scp files carry the ark paths of the machine that produced
+  # them; repoint them at this checkout.
+  ckpt_abs=$(cd "${CKPT_DIR}" && pwd)
+  for f in "${CKPT_DIR}"/embeddings/*/*.scp*; do
+    [ -f "$f" ] && sed -i "s|^\(\S\+\) .*/embeddings/|\1 ${ckpt_abs}/embeddings/|" "$f"
+  done
+  # Inference config in this repo's format (frontend key w2vbert_sv).
+  cp conf/w2vbert_sv_mhfa.yaml "${CKPT_DIR}"/config.yaml
+  echo "Checkpoint ready: ${CKPT_DIR}"
 else
-  echo "CKPT_REPO not set: skip fine-tuned checkpoint (train it via run.sh stages 1-4)"
+  echo "CKPT_REPO empty: skip checkpoint (train your own via run.sh stages 1-4)"
 fi
