@@ -58,6 +58,25 @@ The LMDBs map the raw.list `wav` value (original absolute wav path) to the
 wav bytes; `raw.list`/`utt2spk` are standard WeSpeaker JSON-lines/kaldi
 formats, so the same recipe runs anywhere by regenerating this layout.
 
+## Reproducing from a bare clone
+
+1. **Environment**: `pip install -r requirements.txt` plus `torchnet`
+   (needed by the training executor, missing from upstream requirements).
+2. **Base model** (fully public): `bash local/prepare_assets.sh` downloads
+   the official `facebook/w2v-bert-2.0` (our copy is bit-identical, sha256
+   `eb890c96...`) and drops in `conf/config_baseline.json` — the official
+   config plus additive pruning fields, shipped in this repo.
+3. **Data** (bring your own, licenses forbid redistribution): VoxCeleb1/2 +
+   MUSAN + RIRs. Build the standard WeSpeaker layout with the upstream
+   tooling (`examples/voxceleb/v2/local/prepare_data.sh`,
+   `tools/make_raw_list.py`, `tools/make_lmdb.py` for musan/rirs), place or
+   link it as `data/` here, and use `--use_lmdb false` for wavs on disk.
+   `data/vox1/trials` are the official cleaned VoxCeleb trial lists.
+4. **Checkpoint**: either retrain (`run.sh` stages 1-4, two-stage recipe as
+   configured; note the `frontend_lr_ratio` caveat below) or download a
+   released `avg_model.pt` via `CKPT_REPO=<hf_repo> bash
+   local/prepare_assets.sh`, then run quick-start (b).
+
 ## What was integrated into wespeaker (minimal diff to upstream)
 
 | Added / changed | What |
