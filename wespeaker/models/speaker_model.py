@@ -26,6 +26,7 @@ import wespeaker.models.redimnet2 as redimnet2
 import wespeaker.models.samresnet as samresnet
 import wespeaker.models.xi_vector as xi_vector
 import wespeaker.models.w2vbert_adapter_mfa as w2vbert_adapter_mfa
+import wespeaker.models.ssl_backend as ssl_backend
 
 
 def get_speaker_model(model_name: str):
@@ -57,6 +58,8 @@ def get_speaker_model(model_name: str):
         return getattr(xi_vector, model_name)
     elif model_name.startswith("W2VBert_Adapter_MFA"):
         return getattr(w2vbert_adapter_mfa, model_name)
+    elif model_name.startswith("SSL_BACKEND"):
+        return getattr(ssl_backend, model_name)
     else:  # model_name error !!!
         print(model_name + " not found !!!")
         exit(1)

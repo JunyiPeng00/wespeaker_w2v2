@@ -13,10 +13,27 @@
 # limitations under the License.
 
 
-from .s3prl import S3prlFrontend
-from .whisper_encoder import whisper_encoder
 from .w2vbert import W2VBertFrontend
 from .tfmel import TFMelFrontend
+
+# s3prl / whisper are optional dependencies; keep the corresponding
+# frontends available only when the packages are installed.
+try:
+    from .s3prl import S3prlFrontend
+except ImportError:
+    S3prlFrontend = None
+try:
+    from .whisper_encoder import whisper_encoder
+except ImportError:
+    whisper_encoder = None
+
+
+def _w2vbert_sv_frontend(*args, **kwargs):
+    # Lazy factory: only import the custom W2V-BERT 2.0 modeling code
+    # (wespeaker/frontend/wav2vecbert) when this frontend is requested.
+    from .get_hf_w2vbert_pruning import HuggingfaceFrontend_w2vbert
+    return HuggingfaceFrontend_w2vbert(*args, **kwargs)
+
 
 frontend_class_dict = {
     'fbank': None,
@@ -24,4 +41,5 @@ frontend_class_dict = {
     'whisper_encoder': whisper_encoder,
     'w2vbert': W2VBertFrontend,
     'tfmel': TFMelFrontend,
+    'w2vbert_sv': _w2vbert_sv_frontend,
 }

@@ -1,0 +1,36 @@
+### Inference/extraction config for the W2V-BERT 2.0 + MHFA SV model
+### (ported from the original recipe, checkpoint mhfa_W2VB_ft_v5).
+### Frontend key is `w2vbert_sv` (the custom pruning-capable W2V-BERT
+### frontend); the upstream `w2vbert` key is the LoRA-adapter variant.
+
+data_type: raw
+
+model: SSL_BACKEND_MHFA_LayerNorm
+model_args:
+  compression_dim: 128
+  embed_dim: 256
+  feat_dim: 1024
+  feature_grad_mult: 1.0
+  head_nb: 64
+  nb_layer: 25
+
+dataset_args:
+  frontend: w2vbert_sv
+  w2vbert_sv_args:
+    frame_length: 20
+    frame_shift: 20
+    frozen: false
+    upstream_args:
+      name: config_baseline.json
+      path_or_url: assets/w2v-bert-2.0
+  resample_rate: 16000
+  cmvn: false
+  cmvn_args:
+    norm_mean: false
+    norm_var: false
+  speed_perturb: false
+  shuffle: false
+  aug_prob: 0.0
+  filter: false
+  spec_aug: false
+  num_frms: 200
