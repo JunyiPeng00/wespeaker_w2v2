@@ -181,8 +181,19 @@ class W2VBertSVFrontend(nn.Module):
         self, input_wav: torch.Tensor,
         input_lengths: Optional[torch.LongTensor] = None
     ) -> Tuple[torch.Tensor, None]:
-        """input_wav (B, T) -> ((B, D, T', L), None)."""
+        """input_wav (B, T) -> ((B, D, T', L), None | frame lengths).
+
+        If input_lengths marks a ragged (zero-padded) batch, every utterance
+        gets its own fbank + normalisation, padded frames are masked in the
+        attention and conv modules (as transformers' Wav2Vec2BertEncoder
+        does) and the valid frame counts are returned for the backend.
+        Equal lengths (training) take the unmasked path unchanged.
+        """
         x = input_wav[:, :self.max_input_samples]
+        if input_lengths is not None:
+            lens = input_lengths.clamp(max=x.shape[1])
+            if bool((lens < x.shape[1]).any()):
+                return self._forward_ragged(x, lens)
         with torch.no_grad() if self.frozen else contextlib.nullcontext():
             feats = self.extract_features(x)
             feats = feats.to(next(self.upstream.parameters()).dtype)
@@ -196,3 +207,25 @@ class W2VBertSVFrontend(nn.Module):
                 h = out[0] if isinstance(out, (tuple, list)) else out
                 hidden_states.append(h)
         return torch.stack(hidden_states, dim=0).permute(1, 3, 2, 0), None
+
+    def _forward_ragged(self, x: torch.Tensor, lens: torch.Tensor):
+        with torch.no_grad() if self.frozen else contextlib.nullcontext():
+            lens_l = lens.tolist()  # one host sync instead of one per utterance
+            feats = [self.extract_features(x[i:i + 1, :lens_l[i]])[0]
+                     for i in range(x.shape[0])]
+            flens = torch.tensor([f.shape[0] for f in feats], device=x.device)
+            feats = torch.nn.utils.rnn.pad_sequence(feats, batch_first=True)
+            mask = torch.arange(feats.shape[1], device=x.device)[None, :] \
+                < flens[:, None]
+            feats = feats.to(next(self.upstream.parameters()).dtype)
+            h = self.upstream.feature_projection(feats)[0]
+            h = h.masked_fill(~mask.unsqueeze(-1), 0.0)
+            ext = (1.0 - mask[:, None, None, :].to(h.dtype)) \
+                * torch.finfo(h.dtype).min
+            ext = ext.expand(-1, 1, mask.shape[1], mask.shape[1])
+            hidden_states = [h]
+            for layer in self.upstream.encoder.layers:
+                out = layer(h, attention_mask=ext, conv_attention_mask=mask)
+                h = out[0] if isinstance(out, (tuple, list)) else out
+                hidden_states.append(h)
+        return torch.stack(hidden_states, dim=0).permute(1, 3, 2, 0), flens

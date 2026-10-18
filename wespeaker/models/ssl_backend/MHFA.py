@@ -168,8 +168,10 @@ class SSL_BACKEND_MHFA_LayerNorm(nn.Module):
         # Define a fully connected layer for final output
         self.pooling_fc = nn.Linear(self.head_nb * self.cmp_dim, self.ous_dim)
 
-    def get_frame_att_emb(self, x):
+    def get_frame_att_emb(self, x, lengths=None):
         # Input x has shape: [Batch, Dim, Frame_len, Nb_Layer]
+        # lengths (B,) valid frames per utterance (padded batches); None =
+        # all frames valid (the training path).
         x = GradMultiply.apply(x, self.feature_grad_mult)
 
         # Compute the key by taking a weighted sum of input across layers
@@ -189,6 +191,10 @@ class SSL_BACKEND_MHFA_LayerNorm(nn.Module):
 
         # Compute attention weights using compressed keys
         att_k = self.att_head(k)  # B, T, H
+        if lengths is not None:
+            valid = torch.arange(att_k.shape[1], device=att_k.device)[None, :] \
+                < lengths.to(att_k.device)[:, None]
+            att_k = att_k.masked_fill(~valid.unsqueeze(-1), float('-inf'))
 
         # Adjust dimensions for computing attention output
         v = v.unsqueeze(-2)  # B, T, 1
@@ -208,9 +214,9 @@ class SSL_BACKEND_MHFA_LayerNorm(nn.Module):
 
         return att_out_mean
 
-    def forward(self, x):
+    def forward(self, x, lengths=None):
 
-        att_out = self.get_frame_att_emb(x)
+        att_out = self.get_frame_att_emb(x, lengths)
 
         # Compute attention output by taking weighted sum of values using softmaxed attention weights  # noqa
         pooling_outs = torch.sum(att_out, dim=1)

@@ -17,6 +17,7 @@ import copy
 import os
 
 import fire
+import numpy as np
 import kaldiio
 import torch
 from torch.utils.data import DataLoader
@@ -50,6 +51,13 @@ def extract(config='conf/config.yaml', **kwargs):
         torch.backends.cudnn.allow_tf32 = True
     enable_amp = bool(configs.get('extract_amp', False))
     amp_dtype = getattr(torch, configs.get('extract_amp_dtype', 'bfloat16'))
+    # Whole-utterance extraction in length-sorted, zero-padded batches with
+    # masks (frontends w2vbert_sv / omniasr_sv + an MHFA backend that takes
+    # frame lengths): extract_batch_seconds = audio budget per batch
+    # (B x longest utterance), 0 = off (one utterance per forward, the
+    # original protocol); extract_buffer = utterances sorted per window.
+    batch_seconds = float(configs.get('extract_batch_seconds', 0) or 0)
+    sort_buffer = int(configs.get('extract_buffer', 512))
 
     test_conf = copy.deepcopy(configs['dataset_args'])
     frontend_type = test_conf.get('frontend', 'fbank')
@@ -115,9 +123,77 @@ def extract(config='conf/config.yaml', **kwargs):
     embed_ark = os.path.abspath(embed_ark)
     embed_scp = embed_ark[:-3] + "scp"
 
+    use_ragged = (batch_seconds > 0 and batch_size == 1
+                  and frontend_type in ('w2vbert_sv', 'omniasr_sv')
+                  and not test_conf.get('cmvn', True)
+                  and not test_conf.get('spec_aug', False))
+    if batch_seconds > 0 and not use_ragged:
+        print(f'WARNING: extract_batch_seconds={batch_seconds} requested but '
+              f'ragged batching is unavailable (batch_size={batch_size}, '
+              f'frontend={frontend_type}, cmvn={test_conf.get("cmvn", True)}, '
+              f'spec_aug={test_conf.get("spec_aug", False)}): '
+              'using one utterance per forward', flush=True)
+    if use_ragged:
+        max_samples = int(model.frontend.max_input_samples)
+        budget = int(batch_seconds * test_conf.get('resample_rate', 16000))
+        print(f'ragged batching: {batch_seconds} s of audio per batch, '
+              f'sort buffer {sort_buffer}, cap {max_samples} samples')
+
+    def flush(buf, writer):
+        # buf: list of (key, wav 1-D cpu tensor) in data-list order. Batches
+        # are formed longest-first, but embeddings are written back in the
+        # original order (downstream consumers index the scp by
+        # position).
+        order = sorted(range(len(buf)), key=lambda j: -buf[j][1].shape[0])
+        result = {}
+        i = 0
+        while i < len(order):
+            longest = min(buf[order[i]][1].shape[0], max_samples)
+            n = max(1, budget // longest)
+            idx = order[i:i + n]
+            chunk = [buf[j] for j in idx]
+            i += n
+            lens = torch.tensor([min(w.shape[0], max_samples)
+                                 for _, w in chunk])
+            x = torch.zeros(len(chunk), longest)
+            for r, (_, w) in enumerate(chunk):
+                x[r, :lens[r]] = w[:lens[r]]
+            x, lens = x.to(device, non_blocking=True), lens.to(device)
+            with torch.autocast('cuda', enabled=enable_amp,
+                                dtype=amp_dtype):
+                features, flens = model.frontend(x, lens)
+                if flens is not None:
+                    # e.g. an omniASR input shorter than the 400-sample CNN
+                    # receptive field: fail loudly like the batch-1 path
+                    assert bool((flens > 0).all()), \
+                        f'no valid frame for {[k for (k, _), f in zip(chunk, flens.tolist()) if f <= 0]}'
+                outputs = model(features) if flens is None \
+                    else model(features, flens)
+            embeds = outputs[-1] if isinstance(outputs, tuple) else outputs
+            embeds = embeds.float().cpu().numpy()
+            assert np.isfinite(embeds).all(), \
+                f'non-finite embedding in batch {[k for k, _ in chunk]}'
+            for r, j in enumerate(idx):
+                result[j] = embeds[r]
+        for j, (utt, _) in enumerate(buf):
+            writer(utt, result[j])
+
     with torch.no_grad():
         with kaldiio.WriteHelper('ark,scp:' + embed_ark + "," +
                                  embed_scp) as writer:
+          if use_ragged:
+            buf = []
+            for _, batch in tqdm(enumerate(dataloader)):
+                # cap at the frontend's input limit on entry (vox1 has up
+                # to 145 s utterances; the buffer holds 512 of them)
+                buf.append((batch['key'][0],
+                            batch['wav'][0, 0, :max_samples].float()))
+                if len(buf) >= sort_buffer:
+                    flush(buf, writer)
+                    buf = []
+            if buf:
+                flush(buf, writer)
+          else:
             for _, batch in tqdm(enumerate(dataloader)):
                 utts = batch['key']
                 if frontend_type == 'fbank':

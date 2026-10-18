@@ -21,23 +21,32 @@ export PYTHONUNBUFFERED=1
 cd "${SLURM_SUBMIT_DIR:-.}" || exit 1   # submit from examples/voxceleb/v2_w2vbert_sv
 . ./path.sh
 MAXSEC=${MAXSEC:-10}; TAG=${TAG:-eval}
+NG=${SLURM_GPUS_ON_NODE:-8}; GL="[$(seq -s, 0 $((NG-1)))]"   # works with --gpus N as well as a full node
 [ -f "$MODEL" ] && [ -f "$EXP/config.yaml" ] || { echo "need EXP (with config.yaml) and MODEL"; exit 1; }
-E=$EXP/eval_${TAG}_max${MAXSEC}s; mkdir -p $E
+EXT=""; if [ "${EXTRACT_DTYPE:-fp32}" != "fp32" ] || [ "${EXTRACT_BATCH_SEC:-0}" != "0" ]; then
+  EXT="_${EXTRACT_DTYPE:-fp32}-$([ "${EXTRACT_BATCH_SEC:-0}" != "0" ] && echo rag || echo b1)"; fi   # protocol id; default fp32-b1 keeps old names
+E=$EXP/eval_${TAG}${EXT}_max${MAXSEC}s; mkdir -p $E
 python - "$EXP/config.yaml" "$E/config.yaml" "$MAXSEC" <<'PY'
-import sys, yaml
+import os, sys, yaml
 c = yaml.safe_load(open(sys.argv[1]))
 fe = c['dataset_args'].get('frontend', 'w2vbert_sv')   # w2vbert_sv | omniasr_sv
 c['dataset_args'][fe + '_args']['max_input_seconds'] = float(sys.argv[3])
 if fe == 'w2vbert_sv':
     c['dataset_args'][fe + '_args'].setdefault('feature_extractor', 'torch')
 for k in ['extract_amp', 'extract_tf32']: c[k] = False   # frozen protocol: fp32
+# EXTRACT_DTYPE fp32 (protocol) | tf32 | bf16 ; EXTRACT_BATCH_SEC > 0 = masked length-sorted batching of whole utterances
+dt = os.environ.get('EXTRACT_DTYPE', 'fp32')
+if dt == 'tf32': c['extract_tf32'] = True
+elif dt == 'bf16': c['extract_amp'] = True; c['extract_amp_dtype'] = 'bfloat16'
+elif dt != 'fp32': sys.exit('EXTRACT_DTYPE must be fp32|tf32|bf16')
+c['extract_batch_seconds'] = float(os.environ.get('EXTRACT_BATCH_SEC', '0'))
 yaml.safe_dump(c, open(sys.argv[2], 'w'))
 PY
-echo "== $(date) job=$SLURM_JOB_ID EXP=$EXP MODEL=$MODEL TAG=$TAG MAXSEC=$MAXSEC VOX2_SCP=${VOX2_SCP:-<extract>}"
+echo "== $(date) job=$SLURM_JOB_ID EXP=$EXP MODEL=$MODEL TAG=$TAG MAXSEC=$MAXSEC EXTRACT_DTYPE=${EXTRACT_DTYPE:-fp32} EXTRACT_BATCH_SEC=${EXTRACT_BATCH_SEC:-0} VOX2_SCP=${VOX2_SCP:-<extract>}"
 T0=$(date +%s)
 bash tools/extract_embedding.sh --exp_dir $E --model_path $MODEL --data_type shard \
   --data_list data/vox1/shard.list --wavs_num $(wc -l < data/vox1/wav.scp) --store_dir vox1 \
-  --batch_size 1 --num_workers 2 --nj 8 --gpus "[0,1,2,3,4,5,6,7]"
+  --batch_size 1 --num_workers 2 --nj $NG --gpus "$GL"
 echo "== vox1 extraction $(( $(date +%s) - T0 )) s"; cat $E/embeddings/vox1/extract.result
 if [ -n "$VOX2_SCP" ]; then
   mkdir -p $E/embeddings/vox2_dev && ln -sfn $(readlink -f $VOX2_SCP) $E/embeddings/vox2_dev/xvector.scp
@@ -53,14 +62,17 @@ else
   fi
   bash tools/extract_embedding.sh --exp_dir $E --model_path $MODEL --data_type shard \
     --data_list $V2LIST --wavs_num $V2N --store_dir vox2_dev \
-    --batch_size 16 --num_workers 4 --nj 8 --gpus "[0,1,2,3,4,5,6,7]"
+    --batch_size 16 --num_workers 4 --nj $NG --gpus "$GL"
   echo "== vox2_dev extraction $(( $(date +%s) - T1 )) s"; cat $E/embeddings/vox2_dev/extract.result
 fi
 grep -q Successfully $E/embeddings/vox1/extract.result || { echo "EVAL FAIL: vox1 extraction incomplete"; exit 1; }
 mkdir -p $E/scores
+# score_fast.py = vectorised score.py (one load, all three lists; ~20-35 s instead of ~530 s; identical EER/minDCF,
+# printed scores differ by at most 1e-5 through float32 summation order)
+python wespeaker/bin/${SCORER:-score_fast}.py --exp_dir $E --eval_scp_path $E/embeddings/vox1/xvector.scp \
+  --cal_mean True --cal_mean_dir $E/embeddings/vox2_dev \
+  data/vox1/trials/vox1_O_cleaned.kaldi data/vox1/trials/vox1_E_cleaned.kaldi data/vox1/trials/vox1_H_cleaned.kaldi > /dev/null
 for x in vox1_O_cleaned.kaldi vox1_E_cleaned.kaldi vox1_H_cleaned.kaldi; do
-  python wespeaker/bin/score.py --exp_dir $E --eval_scp_path $E/embeddings/vox1/xvector.scp \
-    --cal_mean True --cal_mean_dir $E/embeddings/vox2_dev data/vox1/trials/$x > /dev/null
   # compute_metrics.py: fire with *scores_files -> positional form (p_target c_miss c_fa files...)
   python wespeaker/bin/compute_metrics.py 0.01 1 1 $E/scores/$x.score 2>&1 | tee -a $E/scores/vox1_cos_result
   python wespeaker/bin/compute_metrics.py 0.05 1 1 $E/scores/$x.score 2>&1 | sed 's/^/[p=0.05] /' | tee -a $E/scores/vox1_cos_result_p005

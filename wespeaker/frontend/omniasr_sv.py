@@ -81,6 +81,7 @@ class OmniASRSVFrontend(nn.Module):
         self.frozen = frozen
         self.max_input_samples = int(max_input_seconds * sample_rate)
         self.layer_norm_states = layer_norm_states
+        self.attn_implementation = attn_implementation
         self.normalize_waveform = normalize_waveform
 
         kwargs = dict(apply_spec_augment=False, mask_time_prob=0.0,
@@ -138,6 +139,10 @@ class OmniASRSVFrontend(nn.Module):
     ) -> Tuple[torch.Tensor, None]:
         """input_wav (B, N) -> ((B, D, T, L), None)."""
         x = input_wav[:, :self.max_input_samples]
+        if input_lengths is not None:
+            lens = input_lengths.clamp(max=x.shape[1])
+            if bool((lens < x.shape[1]).any()):
+                return self._forward_ragged(x, lens)
         with torch.no_grad() if self.frozen else contextlib.nullcontext():
             if self.normalize_waveform:
                 with torch.autocast(device_type=x.device.type, enabled=False):
@@ -152,3 +157,43 @@ class OmniASRSVFrontend(nn.Module):
                 h = out[0] if isinstance(out, (tuple, list)) else out
                 hidden_states.append(self._norm(h))
         return torch.stack(hidden_states, dim=0).permute(1, 3, 2, 0), None
+
+    def _forward_ragged(self, x: torch.Tensor, lens: torch.Tensor):
+        """Zero-padded batch: per-utterance waveform norm over the valid
+        samples; CNN frames whose receptive field lies inside the valid
+        samples are exact; padded frames are zeroed before the conv position
+        encoder and masked in self-attention. Returns frame lengths."""
+        with torch.no_grad() if self.frozen else contextlib.nullcontext():
+            valid_s = torch.arange(x.shape[1], device=x.device)[None, :] \
+                < lens[:, None]
+            if self.normalize_waveform:
+                lens_l = lens.tolist()  # one host sync
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    x = torch.stack([torch.nn.functional.pad(
+                        F.layer_norm(x[i, :n].float(), (n,)),
+                        (0, x.shape[1] - n))
+                        for i, n in enumerate(lens_l)])
+            x = x.masked_fill(~valid_s, 0.0)
+            feats = self.upstream.feature_extractor(x).transpose(1, 2)
+            flens = self.upstream._get_feat_extract_output_lengths(
+                lens).to(torch.long)
+            mask = torch.arange(feats.shape[1], device=x.device)[None, :] \
+                < flens[:, None]
+            h = self.upstream.feature_projection(feats)[0]
+            h = h.masked_fill(~mask.unsqueeze(-1), 0.0)
+            h = h + self.upstream.encoder.pos_conv_embed(h)
+            if self.attn_implementation == 'sdpa':
+                # boolean keep-mask: SDPA needs a float mask in the query
+                # dtype, which differs under autocast
+                ext = mask[:, None, None, :].expand(
+                    -1, 1, mask.shape[1], mask.shape[1])
+            else:
+                ext = (1.0 - mask[:, None, None, :].to(h.dtype)) \
+                    * torch.finfo(h.dtype).min
+                ext = ext.expand(-1, 1, mask.shape[1], mask.shape[1])
+            hidden_states = [self._norm(h)]
+            for layer in self.upstream.encoder.layers:
+                out = layer(h, attention_mask=ext)
+                h = out[0] if isinstance(out, (tuple, list)) else out
+                hidden_states.append(self._norm(h))
+        return torch.stack(hidden_states, dim=0).permute(1, 3, 2, 0), flens
