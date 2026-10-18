@@ -26,8 +26,10 @@ E=$EXP/eval_${TAG}_max${MAXSEC}s; mkdir -p $E
 python - "$EXP/config.yaml" "$E/config.yaml" "$MAXSEC" <<'PY'
 import sys, yaml
 c = yaml.safe_load(open(sys.argv[1]))
-c['dataset_args']['w2vbert_sv_args']['max_input_seconds'] = float(sys.argv[3])
-c['dataset_args']['w2vbert_sv_args'].setdefault('feature_extractor', 'torch')
+fe = c['dataset_args'].get('frontend', 'w2vbert_sv')   # w2vbert_sv | omniasr_sv
+c['dataset_args'][fe + '_args']['max_input_seconds'] = float(sys.argv[3])
+if fe == 'w2vbert_sv':
+    c['dataset_args'][fe + '_args'].setdefault('feature_extractor', 'torch')
 for k in ['extract_amp', 'extract_tf32']: c[k] = False   # frozen protocol: fp32
 yaml.safe_dump(c, open(sys.argv[2], 'w'))
 PY

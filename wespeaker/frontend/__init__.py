@@ -35,6 +35,11 @@ def _w2vbert_sv_frontend(*args, **kwargs):
     return W2VBertSVFrontend(*args, **kwargs)
 
 
+def _omniasr_sv_frontend(*args, **kwargs):
+    from .omniasr_sv import OmniASRSVFrontend
+    return OmniASRSVFrontend(*args, **kwargs)
+
+
 frontend_class_dict = {
     'fbank': None,
     's3prl': S3prlFrontend,
@@ -42,4 +47,5 @@ frontend_class_dict = {
     'w2vbert': W2VBertFrontend,
     'tfmel': TFMelFrontend,
     'w2vbert_sv': _w2vbert_sv_frontend,
+    'omniasr_sv': _omniasr_sv_frontend,
 }
