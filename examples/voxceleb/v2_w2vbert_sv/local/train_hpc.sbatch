@@ -65,14 +65,22 @@ if [ -n "$CKPT" ] && [ "$CKPT" -ge "$NUM_EPOCHS" ]; then echo "== all $NUM_EPOCH
 # cleanly; the next submission resumes from the last completed epoch.
 trap 'echo "== $(date) SIGTERM received, job will be resumed from last epoch ckpt"; kill $TRAIN_PID; wait $TRAIN_PID' TERM
 
+# Stage the MUSAN/RIR LMDBs (14 GB) on the node's RAM disk: streaming a large shard set (TBs per epoch) through the page cache
+# evicts their mmap'd pages and every augmentation then faults 4 KB pages back from Lustre. tmpfs pages cannot be evicted. AUG_TO_SHM=0 disables.
+REVERB=data/rirs/lmdb; NOISE=data/musan/lmdb
+if [ "${AUG_TO_SHM:-1}" = "1" ]; then
+  SHM=/dev/shm/aug_${SLURM_JOB_ID:-$$}; mkdir -p $SHM/rirs $SHM/musan
+  cp data/rirs/lmdb/data.mdb $SHM/rirs/ && cp data/musan/lmdb/data.mdb $SHM/musan/ && REVERB=$SHM/rirs NOISE=$SHM/musan
+  echo "== aug LMDBs staged to $SHM ($(du -sh $SHM | cut -f1))"; trap "rm -rf $SHM" EXIT
+fi
 python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$NGPU \
   wespeaker/bin/train.py --config $CONFIG \
     --exp_dir $EXP --gpus "$GPUS" \
     --data_type shard \
     --train_data data/${TRAIN_SET}/shard.list \
     --train_label data/${TRAIN_SET}/utt2spk \
-    --reverb_data data/rirs/lmdb \
-    --noise_data data/musan/lmdb \
+    --reverb_data $REVERB \
+    --noise_data $NOISE \
     $CKPT_ARG &
 TRAIN_PID=$!
 wait $TRAIN_PID; RC=$?
