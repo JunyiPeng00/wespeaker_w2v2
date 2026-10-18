@@ -18,9 +18,25 @@ import pickle
 import lmdb
 
 
+def read_exclude_list(path):
+    """One key per line, '#' comments allowed."""
+    with open(path) as f:
+        return set(line.strip() for line in f
+                   if line.strip() and not line.startswith('#'))
+
+
+def exclude_base_key(key):
+    # musan/lmdb keys are file names; musan_chunk4s/lmdb keys append
+    # '__c<i>' (chunk index) to them
+    return key.split('__c')[0]
+
+
 class LmdbData:
 
-    def __init__(self, lmdb_file):
+    def __init__(self, lmdb_file, exclude_keys=None):
+        """exclude_keys: optional set of keys (or a path to a key list) never
+        returned by random_one(); a key is excluded when
+        exclude_base_key(key) is in the set. None = all keys (default)."""
         self.db = lmdb.open(lmdb_file,
                             readonly=True,
                             lock=False,
@@ -30,6 +46,15 @@ class LmdbData:
             assert obj is not None
             self.keys = pickle.loads(obj)
             assert isinstance(self.keys, list)
+        self.num_excluded = 0
+        if exclude_keys is not None:
+            if isinstance(exclude_keys, str):
+                exclude_keys = read_exclude_list(exclude_keys)
+            exclude_keys = set(exclude_keys)
+            kept = [k for k in self.keys
+                    if exclude_base_key(k) not in exclude_keys]
+            self.num_excluded = len(self.keys) - len(kept)
+            self.keys = kept
 
     def random_one(self):
         assert len(self.keys) > 0

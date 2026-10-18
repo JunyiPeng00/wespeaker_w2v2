@@ -51,6 +51,16 @@ class Processor(IterableDataset):
         return Processor(self, f, *self.args, **self.kw)
 
 
+class EpochProcessor(Processor):
+    """Processor whose function also receives the current epoch (kw
+    'epoch'), set by set_epoch() in the main process before the DataLoader
+    workers are (re)created for that epoch."""
+
+    def set_epoch(self, epoch):
+        self.kw['epoch'] = epoch
+        super().set_epoch(epoch)
+
+
 class DistributedSampler:
 
     def __init__(self, shuffle=True, partition=True):
@@ -141,7 +151,9 @@ def Dataset(data_type,
             reverb_lmdb_file=None,
             noise_lmdb_file=None,
             repeat_dataset=True,
-            train_lmdb_file=None):
+            train_lmdb_file=None,
+            batch_size=None,
+            crop_seed=0):
     """ Construct dataset from arguments
 
         We have two shuffle stage in the Dataset. The first is global
@@ -159,6 +171,9 @@ def Dataset(data_type,
             repeat_dataset: True for training while False for testing
             train_lmdb_file: optional lmdb with raw audio bytes keyed by the
                 "wav" field of the raw data list (raw data_type only)
+            batch_size: dataloader batch size, required by
+                configs['num_frms_choices'] (one crop length per batch)
+            crop_seed: seed of the per-batch crop-length sequence
     """
     assert data_type in ['shard', 'raw', 'feat']
     frontend_type = configs.get('frontend', 'fbank')
@@ -214,8 +229,23 @@ def Dataset(data_type,
     # spk2id
     dataset = Processor(dataset, processor.spk_to_id, spk2id_dict)
 
+    # num_frms_choices: [[num_frms, prob], ...] -> one crop length per
+    # batch (see processor.random_chunk_per_batch); absent -> fixed num_frms
+    num_frms_choices = configs.get('num_frms_choices', None)
+
+    def _per_batch_chunk(dataset, frms_to_len, dtype):
+        assert batch_size, 'num_frms_choices needs the dataloader batch_size'
+        lens = [frms_to_len(int(c[0])) for c in num_frms_choices]
+        weights = [float(c[1]) for c in num_frms_choices]
+        return EpochProcessor(dataset, processor.random_chunk_per_batch,
+                              lens, weights, batch_size, dtype,
+                              seed=crop_seed,
+                              sync_ranks=configs.get('crop_sync_ranks', True))
+
     if data_type == 'feat':
-        if not whole_utt:
+        if not whole_utt and num_frms_choices:
+            dataset = _per_batch_chunk(dataset, lambda f: f, 'feat')
+        elif not whole_utt:
             # random chunk
             chunk_len = num_frms = configs.get('num_frms', 200)
             dataset = Processor(dataset, processor.random_chunk, chunk_len,
@@ -238,21 +268,69 @@ def Dataset(data_type,
                 dataset = Processor(dataset, processor.speed_perturb,
                                     len(spk2id_dict))
         if not whole_utt:
-            # random chunk
-            num_frms = configs.get('num_frms', 200)
             frame_shift, frame_length = _get_frame_params()
-            chunk_len = ((num_frms - 1) * frame_shift +
-                         frame_length) * resample_rate // 1000
-            dataset = Processor(dataset, processor.random_chunk, chunk_len,
-                                data_type)
+
+            def frms_to_len(num_frms):
+                # w2vbert_sv: frame_shift = frame_length = 20 ms, so
+                # num_frms 50/100/150/300 -> 1/2/3/6 s
+                return ((num_frms - 1) * frame_shift +
+                        frame_length) * resample_rate // 1000
+
+            if num_frms_choices:
+                dataset = _per_batch_chunk(dataset, frms_to_len, data_type)
+            else:
+                # random chunk
+                num_frms = configs.get('num_frms', 200)
+                chunk_len = frms_to_len(num_frms)
+                dataset = Processor(dataset, processor.random_chunk,
+                                    chunk_len, data_type)
         # add reverb & noise
         aug_prob = configs.get('aug_prob', 0.6)
+        # aug_mode: legacy (default, upstream reverb XOR noise with prob
+        # aug_prob) | mixed (per-sample type drawn from aug_probs; aug_prob
+        # only acts as the on/off switch, extraction sets it to 0)
+        aug_mode = configs.get('aug_mode', 'legacy')
+        snr_ranges = {
+            k: configs[k + '_snr']
+            for k in ('noise', 'speech', 'music') if k + '_snr' in configs
+        }
+        # overlap / interfering-speaker aug (interferer_args, see
+        # processor.add_interferer); in mixed mode its probability is
+        # aug_probs['overlap'], in legacy mode interferer_args['prob']
+        interferer_args = dict(configs.get('interferer_args', {}))
         if (reverb_lmdb_file and noise_lmdb_file) and (aug_prob > 0.0):
             reverb_data = LmdbData(reverb_lmdb_file)
-            noise_data = LmdbData(noise_lmdb_file)
-            dataset = Processor(dataset, processor.add_reverb_noise,
-                                reverb_data, noise_data, resample_rate,
-                                aug_prob)
+            # noise_exclude_list: keys excluded from training
+            # (never drawn in training); absent = all keys
+            noise_data = LmdbData(noise_lmdb_file,
+                                  exclude_keys=configs.get(
+                                      'noise_exclude_list', None))
+            if aug_mode == 'mixed':
+                dataset = Processor(dataset, processor.draw_aug_type,
+                                    configs['aug_probs'])
+                if configs['aug_probs'].get('overlap', 0.0) > 0.0:
+                    interferer_args.pop('prob', None)
+                    dataset = Processor(dataset, processor.add_interferer,
+                                        reverb_source=reverb_data,
+                                        resample_rate=resample_rate,
+                                        use_aug_type=True,
+                                        **interferer_args)
+                dataset = Processor(dataset, processor.add_reverb_noise,
+                                    reverb_data, noise_data, resample_rate,
+                                    aug_prob, aug_mode='mixed',
+                                    snr_ranges=snr_ranges,
+                                    overlap_noise_prob=configs.get(
+                                        'overlap_noise_prob', 0.5))
+            else:
+                assert aug_mode == 'legacy', aug_mode
+                if interferer_args.get('prob', 0.0) > 0.0:
+                    dataset = Processor(dataset, processor.add_interferer,
+                                        reverb_source=reverb_data,
+                                        resample_rate=resample_rate,
+                                        **interferer_args)
+                dataset = Processor(dataset, processor.add_reverb_noise,
+                                    reverb_data, noise_data, resample_rate,
+                                    aug_prob, snr_ranges=snr_ranges)
         # compute fbank
         if frontend_type == 'fbank':
             dataset = Processor(dataset, processor.compute_fbank,

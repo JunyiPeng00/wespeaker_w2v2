@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+
 import tableprint as tp
 
 import torch
@@ -72,7 +74,10 @@ def apply_grad_norm_adam(model, optimizer, cur_iter, total_iters, cfg):
     return s_t, total
 
 def run_epoch(dataloader, epoch_iter, model, criterion, optimizer, scheduler,
-              margin_scheduler, epoch, logger, scaler, device, configs):
+              margin_scheduler, epoch, logger, scaler, device, configs,
+              ema=None):
+    """ema: optional wespeaker.utils.ema.ModelEMA, updated after every
+    optimizer step (pass it on rank 0 only)."""
     model.train()
     # By default use average pooling
     loss_meter = tnt.meter.AverageValueMeter()
@@ -85,7 +90,15 @@ def run_epoch(dataloader, epoch_iter, model, criterion, optimizer, scheduler,
     gna_cfg = configs.get('grad_norm_adam') or {}
     use_gna = bool(gna_cfg.get('enable', False))
     total_iters = epoch_iter * configs['num_epochs']
+    # profile_steps: True -> one 'PROF' line per step (crop length, dataloader
+    # wait, synchronized step time, peak CUDA memory of that step). Adds a
+    # cuda.synchronize per step; for smoke/benchmark runs only.
+    profile = configs.get('profile_steps', False)
+    t_ready = time.time()
     for i, batch in enumerate(dataloader):
+        if profile:
+            t_got = time.time()
+            torch.cuda.reset_peak_memory_stats()
         cur_iter = (epoch - 1) * epoch_iter + i
         scheduler.step(cur_iter)
         margin_scheduler.step(cur_iter)
@@ -173,6 +186,22 @@ def run_epoch(dataloader, epoch_iter, model, criterion, optimizer, scheduler,
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
+        if ema is not None:
+            ema.update(model.module)
+        if profile:
+            torch.cuda.synchronize()
+            t_done = time.time()
+            n = batch['wav'].shape[-1] if 'wav' in batch else \
+                batch['feat'].shape[1]
+            logger.info(
+                'PROF ep {} it {} len {} bs {} wait {:.3f} step {:.3f} '
+                'peak_alloc_MiB {:.0f} peak_reserved_MiB {:.0f} loss {:.4f} '
+                'lr {:.3e}'.format(
+                    epoch, i + 1, n, targets.shape[0], t_got - t_ready,
+                    t_done - t_got, torch.cuda.max_memory_allocated() / 2**20,
+                    torch.cuda.max_memory_reserved() / 2**20, loss.item(),
+                    scheduler.get_lr()))
+            t_ready = time.time()
 
         # log
         if clip_on_scaled and (i + 1) % configs['log_batch_interval'] == 0:

@@ -433,11 +433,272 @@ def random_chunk(data, chunk_len, data_type='shard/raw/feat'):
         yield sample
 
 
+# Default SNR ranges (dB) per MUSAN category, as used by the legacy path.
+DEFAULT_SNR_RANGES = {'noise': [0, 15], 'speech': [10, 30], 'music': [5, 15]}
+
+# Per-sample augmentation types of aug_mode 'mixed' (order matters only for
+# the cumulative draw in draw_aug_type).
+AUG_TYPES = ('clean', 'noise', 'reverb', 'reverb_noise', 'overlap')
+
+
+def _snr_range_for_key(key, snr_ranges):
+    if key.startswith('noise'):
+        return snr_ranges.get('noise', DEFAULT_SNR_RANGES['noise'])
+    elif key.startswith('speech'):
+        return snr_ranges.get('speech', DEFAULT_SNR_RANGES['speech'])
+    elif key.startswith('music'):
+        return snr_ranges.get('music', DEFAULT_SNR_RANGES['music'])
+    return snr_ranges.get('noise', DEFAULT_SNR_RANGES['noise'])
+
+
+def _decode_rir(rir_data, resample_rate):
+    rir_sr, rir_audio = wavfile.read(io.BytesIO(rir_data))
+    rir_audio = rir_audio.astype(np.float32)
+    if rir_sr != resample_rate:
+        rir_audio = signal.resample(
+            rir_audio, int(len(rir_audio) / rir_sr * resample_rate))
+    rir_audio = rir_audio / np.sqrt(np.sum(rir_audio**2))
+    return rir_audio
+
+
+def _rir_same_room(reverb_source, key):
+    """ Random RIR key from the same room directory as `key` (e.g.
+        smallroom/Room155/...), i.e. another source/receiver position in the
+        same simulated room. Falls back to any RIR. The room index is cached
+        on the source object.
+    """
+    index = getattr(reverb_source, '_room_index', None)
+    if index is None:
+        index = {}
+        for k in reverb_source.keys:
+            index.setdefault(k.rsplit('/', 1)[0], []).append(k)
+        reverb_source._room_index = index
+    room = index.get(key.rsplit('/', 1)[0])
+    if not room:
+        return reverb_source.random_one()
+    other = random.choice(room)
+    with reverb_source.db.begin(write=False) as txn:
+        value = txn.get(other.encode())
+    return other, value
+
+
+def apply_reverb(audio, reverb_source, resample_rate=16000, rir_item=None):
+    """ Convolve `audio` (1-D np.ndarray) with a random (or the given) RIR,
+        keep the input length. Returns (reverberant audio, rir key).
+    """
+    if rir_item is None:
+        rir_item = reverb_source.random_one()
+    key, rir_data = rir_item
+    rir_audio = _decode_rir(rir_data, resample_rate)
+    out = signal.convolve(audio, rir_audio, mode='full')[:audio.shape[0]]
+    return out.astype(np.float32), key
+
+
+def apply_noise(audio, noise_source, resample_rate=16000, snr_ranges=None):
+    """ Add a random MUSAN-style noise at a random SNR drawn from the range of
+        its category. Returns (noisy audio, noise key, snr).
+    """
+    snr_ranges = snr_ranges or {}
+    audio_len = audio.shape[0]
+    audio_db = 10 * np.log10(np.mean(audio**2) + 1e-4)
+    key, noise_data = noise_source.random_one()
+    snr_range = _snr_range_for_key(key, snr_ranges)
+    noise_sr, noise_audio = wavfile.read(io.BytesIO(noise_data))
+    # chunk BEFORE the float conversion (MUSAN files are minutes long);
+    # same values and RNG use as converting first
+    if noise_sr != resample_rate:
+        noise_audio = get_random_chunk(
+            noise_audio, int(audio_len / resample_rate * noise_sr))
+        noise_audio = noise_audio.astype(np.float32) / (1 << 15)
+        noise_audio = signal.resample(noise_audio, audio_len)
+    else:
+        noise_audio = get_random_chunk(noise_audio, audio_len)
+        noise_audio = noise_audio.astype(np.float32) / (1 << 15)
+    noise_snr = random.uniform(snr_range[0], snr_range[1])
+    noise_db = 10 * np.log10(np.mean(noise_audio**2) + 1e-4)
+    noise_audio = np.sqrt(10**(
+        (audio_db - noise_db - noise_snr) / 10)) * noise_audio
+    return audio + noise_audio, key, noise_snr
+
+
+def random_chunk_per_batch(data,
+                           chunk_lens,
+                           weights,
+                           batch_size,
+                           data_type='shard/raw/feat',
+                           seed=0,
+                           epoch=0,
+                           sync_ranks=True):
+    """ Random chunk with ONE chunk length per batch (variable crop length).
+
+        torch DataLoader (IterableDataset, automatic batching) builds every
+        batch from `batch_size` CONSECUTIVE samples of a single worker's
+        iterator, so redrawing the length every `batch_size` samples of this
+        stage keeps every batch rectangular. All later stages must therefore
+        be 1:1 and order-preserving (aug / interferer / fbank are).
+
+        sync_ranks: the length sequence is drawn from a private RNG seeded by
+        (seed, epoch, worker_id), which does not depend on the rank. DDP step
+        s on every rank is served by worker s % num_workers, so all ranks crop
+        the same length at the same step (no rank waits for a longer batch).
+        If False the private RNG is seeded from the global `random` stream
+        (per-rank lengths).
+
+        Args:
+            chunk_lens: candidate chunk lengths (samples or frames)
+            weights: their probabilities
+            batch_size: dataloader batch size (per rank)
+    """
+    assert len(chunk_lens) == len(weights) and batch_size > 0
+    worker_info = torch.utils.data.get_worker_info()
+    worker_id = 0 if worker_info is None else worker_info.id
+    if sync_ranks:
+        rng = random.Random('crop-{}-{}-{}'.format(seed, epoch,
+                                                       worker_id))
+    else:
+        rng = random.Random(random.getrandbits(64))
+    chunk_len = None
+    for n, sample in enumerate(data):
+        assert 'key' in sample
+        if n % batch_size == 0:
+            chunk_len = rng.choices(chunk_lens, weights=weights)[0]
+        if data_type == 'feat':
+            sample['feat'] = get_random_chunk(sample['feat'], chunk_len)
+        else:
+            wav = get_random_chunk(sample['wav'][0], chunk_len)
+            sample['wav'] = wav.unsqueeze(0)
+        yield sample
+
+
+def draw_aug_type(data, aug_probs):
+    """ Draw one augmentation type per sample (aug_mode 'mixed') and store it
+        as sample['aug_type']. Consumed by add_interferer (type 'overlap')
+        and add_reverb_noise.
+
+        Args:
+            aug_probs: {clean, noise, reverb, reverb_noise, overlap} -> prob;
+                absolute probabilities, missing keys are 0; they must sum to
+                <= 1 and the remainder goes to 'clean' (so the rate of every
+                non-clean type is exactly what is written).
+    """
+    unknown = set(aug_probs) - set(AUG_TYPES)
+    assert not unknown, 'unknown aug types {}'.format(unknown)
+    weights = [float(aug_probs.get(t, 0.0)) for t in AUG_TYPES]
+    assert min(weights) >= 0 and sum(weights) <= 1.0 + 1e-6, aug_probs
+    weights[0] += max(0.0, 1.0 - sum(weights))  # remainder -> clean
+    cum, acc = [], 0.0
+    for w in weights:
+        acc += w
+        cum.append(acc)
+    cum[-1] = 1.0
+    for sample in data:
+        u = random.random()
+        for t, c in zip(AUG_TYPES, cum):
+            if u < c:
+                sample['aug_type'] = t
+                break
+        yield sample
+
+
+def add_interferer(data,
+                   prob=0.0,
+                   sir_db=(0, 10),
+                   cover=(0.25, 1.0),
+                   reverb_both=True,
+                   reverb_source=None,
+                   resample_rate=16000,
+                   buffer_size=64,
+                   neg_sir_prob=0.0,
+                   neg_sir_db=(-3, 0),
+                   use_aug_type=False,
+                   debug=False):
+    """ Overlap augmentation: mix a second (interfering) speaker into a
+        random contiguous part of the target crop. Place after cropping.
+
+        The interferer is taken from a FIFO buffer of the last `buffer_size`
+        clean crops seen by this stage (no extra IO; the stream is already
+        shuffled), restricted to a DIFFERENT speaker (compared on
+        sample['spk'], so speed-perturbed copies of the same speaker are
+        excluded too). The label stays the target's. Order-preserving and
+        1:1, so per-batch crop lengths are kept.
+
+        SIR (dB) = 10 log10( mean(target^2 over the whole crop)
+                             / mean(interferer^2 over its active segment) ),
+        measured after reverberation when reverb_both.
+
+        Args:
+            prob: probability per sample (ignored when use_aug_type)
+            sir_db: [lo, hi] uniform SIR range
+            cover: [lo, hi] fraction of the crop covered by the interferer
+            reverb_both: convolve target and interferer with two RIRs of the
+                same room (needs reverb_source)
+            neg_sir_prob / neg_sir_db: with this prob draw the SIR from
+                neg_sir_db instead (dominant interferer cases)
+            use_aug_type: mix iff sample['aug_type'] == 'overlap' (aug_mode
+                mixed); when no different-speaker crop is buffered yet the
+                sample falls back to aug_type 'reverb'
+            debug: store mixing details in sample['interferer_info']
+    """
+    from collections import deque
+    buf = deque(maxlen=buffer_size)
+    for sample in data:
+        assert 'wav' in sample
+        wav = sample['wav']
+        spk = sample.get('spk', sample.get('label'))
+        if use_aug_type:
+            do_mix = sample.get('aug_type') == 'overlap'
+        else:
+            do_mix = prob > 0 and prob > random.random()
+        if do_mix:
+            cands = [b for b in buf if b[0] != spk]
+            if not cands:
+                if use_aug_type:
+                    sample['aug_type'] = 'reverb' if reverb_both else 'clean'
+            else:
+                i_spk, i_wav = random.choice(cands)
+                target = wav.numpy()[0].astype(np.float32)
+                T = target.shape[0]
+                seg_len = max(1, int(round(random.uniform(*cover) * T)))
+                seg_len = min(seg_len, T)
+                start = random.randint(0, T - seg_len)
+                interf = get_random_chunk(
+                    i_wav.numpy()[0].astype(np.float32), seg_len)
+                if reverb_both and reverb_source is not None:
+                    target, rir_key = apply_reverb(target, reverb_source,
+                                                   resample_rate)
+                    interf, _ = apply_reverb(
+                        interf, reverb_source, resample_rate,
+                        rir_item=_rir_same_room(reverb_source, rir_key))
+                if neg_sir_prob > 0 and neg_sir_prob > random.random():
+                    sir = random.uniform(*neg_sir_db)
+                else:
+                    sir = random.uniform(*sir_db)
+                p_t = np.mean(target.astype(np.float64)**2) + 1e-10
+                p_i = np.mean(interf.astype(np.float64)**2) + 1e-10
+                gain_i = np.sqrt(p_t / (p_i * 10**(sir / 10)))
+                out = target.astype(np.float64)
+                out[start:start + seg_len] += gain_i * interf
+                norm = 1.0 / (np.max(np.abs(out)) + 1e-4)
+                out = (out * norm).astype(np.float32)
+                if debug:
+                    sample['interferer_info'] = dict(
+                        spk=i_spk, sir_db=sir, start=start, length=seg_len,
+                        norm=norm, target=target, interferer=gain_i * interf)
+                sample['wav'] = torch.from_numpy(out).unsqueeze(0)
+        # buffer the CLEAN crop (the tensor object is never modified in
+        # place downstream: augmentations assign a new sample['wav'])
+        buf.append((spk, wav))
+        yield sample
+
+
 def add_reverb_noise(data,
                      reverb_source,
                      noise_source,
                      resample_rate=16000,
-                     aug_prob=0.6):
+                     aug_prob=0.6,
+                     aug_mode='legacy',
+                     snr_ranges=None,
+                     overlap_noise_prob=0.5):
     """ Add reverb & noise aug
 
         Args:
@@ -445,11 +706,45 @@ def add_reverb_noise(data,
             reverb_source: reverb LMDB data source
             noise_source: noise LMDB data source
             resample_rate: resample rate for reverb/noise data
-            aug_prob: aug probability
+            aug_prob: aug probability (legacy mode only)
+            aug_mode: 'legacy' = with prob aug_prob apply reverb XOR noise
+                (50/50), bit-identical to upstream wespeaker;
+                'mixed' = apply sample['aug_type'] drawn by draw_aug_type:
+                clean | noise | reverb | reverb_noise (RIR then noise, the
+                noise SNR is relative to the reverberant speech) | overlap
+                (interferer already mixed by add_interferer; additive noise
+                with prob overlap_noise_prob)
+            snr_ranges: optional {noise, speech, music} -> [lo, hi] dB
+                overrides of DEFAULT_SNR_RANGES (both modes)
 
         Returns:
             Iterable[{key, wav, label, sample_rate}]
     """
+    snr_ranges = snr_ranges or {}
+    assert aug_mode in ('legacy', 'mixed'), aug_mode
+    if aug_mode == 'mixed':
+        for sample in data:
+            assert 'wav' in sample
+            aug_type = sample.get('aug_type', 'clean')
+            if aug_type == 'clean':
+                yield sample
+                continue
+            audio = sample['wav'].numpy()[0]
+            if aug_type in ('reverb', 'reverb_noise'):
+                audio, _ = apply_reverb(audio, reverb_source, resample_rate)
+            if aug_type in ('noise', 'reverb_noise') or (
+                    aug_type == 'overlap'
+                    and overlap_noise_prob > random.random()):
+                audio, _, _ = apply_noise(audio, noise_source, resample_rate,
+                                          snr_ranges)
+            # normalize into [-1, 1]
+            audio = audio / (np.max(np.abs(audio)) + 1e-4)
+            sample['wav'] = torch.from_numpy(
+                np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
+            yield sample
+        return
+
+    # ---- legacy path (unchanged upstream code; only snr_ranges lookup) ----
     for sample in data:
         assert 'wav' in sample
         assert 'key' in sample
@@ -477,14 +772,7 @@ def add_reverb_noise(data,
                 audio_db = 10 * np.log10(np.mean(audio**2) + 1e-4)
 
                 key, noise_data = noise_source.random_one()
-                if key.startswith('noise'):
-                    snr_range = [0, 15]
-                elif key.startswith('speech'):
-                    snr_range = [10, 30]
-                elif key.startswith('music'):
-                    snr_range = [5, 15]
-                else:
-                    snr_range = [0, 15]
+                snr_range = _snr_range_for_key(key, snr_ranges)
                 noise_sr, noise_audio = wavfile.read(io.BytesIO(noise_data))
                 noise_audio = noise_audio.astype(np.float32) / (1 << 15)
                 if noise_sr != resample_rate:

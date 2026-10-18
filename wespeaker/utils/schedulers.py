@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import math
+import re
 
 
 class MarginScheduler:
@@ -260,6 +261,9 @@ class BaseClass:
                  warm_from_zero=False,
                  frontend_modules=None,
                  frontend_lr_ratio=1.0,
+                 frontend_layer_decay=None,
+                 frontend_layer_pattern=r'\.layers\.(\d+)\.',
+                 frontend_bottom_lr_scale=None,
                  model=None):
         '''
         warm_up_epoch: the first warm_up_epoch is the multiprocess warm-up stage
@@ -270,6 +274,14 @@ class BaseClass:
         pretrained SSL frontend). Requires `model` (the unwrapped model, not
         the DDP wrapper) to map optimizer params back to their names; without
         `model`, differential lr is not applied.
+        frontend_layer_decay: layer-wise lr decay (LLRD) for the frontend
+        encoder, e.g. 0.85. Frontend params whose name matches
+        frontend_layer_pattern (group 1 = layer index) get one param group per
+        layer with lr = lr * frontend_lr_ratio * decay ** (L - 1 - i), i.e.
+        the top layer gets the frontend lr; the remaining frontend params
+        (feature_projection, fbank, ...) form a bottom group with scale
+        frontend_bottom_lr_scale (default decay ** L; 0.0 freezes them in
+        effect). None (default) = one frontend group, unchanged behaviour.
         '''
         self.optimizer = optimizer
         self.max_iter = num_epochs * epoch_iter
@@ -286,12 +298,59 @@ class BaseClass:
             self.frontend_modules = [frontend_modules]
         else:
             self.frontend_modules = list(frontend_modules)
+        self.frontend_layer_decay = frontend_layer_decay
+        self.frontend_layer_pattern = re.compile(frontend_layer_pattern)
+        self.frontend_bottom_lr_scale = frontend_bottom_lr_scale
         self._param_id_to_name = {}
         if model is not None:
             for name, param in model.named_parameters():
                 self._param_id_to_name[id(param)] = name
-        self._auto_restructure_optimizer()
-        self._identify_frontend_param_groups()
+        if frontend_layer_decay is not None:
+            assert self._param_id_to_name, 'frontend_layer_decay needs model'
+            self._restructure_layerwise()
+        else:
+            self._auto_restructure_optimizer()
+            self._identify_frontend_param_groups()
+
+    def _restructure_layerwise(self):
+        # One group for the backend, one per frontend encoder layer and one
+        # for the remaining (bottom) frontend params; each group carries
+        # _is_frontend and _lr_scale used by set_lr().
+        assert len(self.optimizer.param_groups) == 1, (
+            'frontend_layer_decay expects a single initial param group')
+        assert not self.optimizer.state, 'optimizer already has state'
+        original_group = self.optimizer.param_groups[0]
+        backend, bottom, layers = [], [], {}
+        for param in original_group['params']:
+            name = self._param_id_to_name.get(id(param), '')
+            if not self._is_frontend_name(name):
+                backend.append(param)
+                continue
+            m = self.frontend_layer_pattern.search(name)
+            if m is None:
+                bottom.append(param)
+            else:
+                layers.setdefault(int(m.group(1)), []).append(param)
+        assert layers, 'no frontend parameter matches frontend_layer_pattern'
+        num_layers = max(layers) + 1
+        decay = self.frontend_layer_decay
+        bottom_scale = (decay**num_layers
+                        if self.frontend_bottom_lr_scale is None else
+                        self.frontend_bottom_lr_scale)
+        hyper = {k: v for k, v in original_group.items() if k != 'params'}
+        groups = []
+        if backend:
+            groups.append(dict(hyper, params=backend, _is_frontend=False,
+                               _lr_scale=1.0, _group='backend'))
+        for i in sorted(layers):
+            groups.append(dict(hyper, params=layers[i], _is_frontend=True,
+                               _lr_scale=decay**(num_layers - 1 - i),
+                               _group='frontend_layer_{}'.format(i)))
+        if bottom:
+            groups.append(dict(hyper, params=bottom, _is_frontend=True,
+                               _lr_scale=bottom_scale,
+                               _group='frontend_bottom'))
+        self.optimizer.param_groups = groups
 
     def _is_frontend_name(self, param_name):
         return any(
@@ -364,6 +423,8 @@ class BaseClass:
                 param_group['lr'] = current_lr * self.frontend_lr_ratio
             else:
                 param_group['lr'] = current_lr
+            if '_lr_scale' in param_group:  # frontend_layer_decay groups
+                param_group['lr'] *= param_group['_lr_scale']
 
     def step(self, current_iter=None):
         if current_iter is not None:

@@ -30,8 +30,12 @@ from wespeaker.dataset.dataset import Dataset
 from wespeaker.frontend import *
 from wespeaker.models.projections import get_projection
 from wespeaker.models.speaker_model import get_speaker_model
-from wespeaker.utils.checkpoint import load_checkpoint, save_checkpoint
+from wespeaker.utils.frontend_utils import maybe_truncate_frontend
+from wespeaker.utils.checkpoint import load_checkpoint
+from wespeaker.utils.ema import ModelEMA
 from wespeaker.utils.executor import run_epoch
+from wespeaker.utils.train_state import (restore_for_resume,
+                                         save_epoch_artifacts)
 from wespeaker.utils.file_utils import read_table
 from wespeaker.utils.utils import get_logger, parse_config_or_kwargs, set_seed, \
     spk2id
@@ -101,7 +105,9 @@ def train(config='conf/config.yaml', **kwargs):
                             spk2id_dict,
                             reverb_lmdb_file=configs.get('reverb_data', None),
                             noise_lmdb_file=configs.get('noise_data', None),
-                            train_lmdb_file=configs.get('train_lmdb') or None)
+                            train_lmdb_file=configs.get('train_lmdb') or None,
+                            batch_size=configs['dataloader_args']['batch_size'],
+                            crop_seed=configs['seed'])
     train_dataloader = DataLoader(train_dataset, **configs['dataloader_args'])
     batch_size = configs['dataloader_args']['batch_size']
     if configs['dataset_args'].get('sample_num_per_epoch', 0) > 0:
@@ -130,6 +136,9 @@ def train(config='conf/config.yaml', **kwargs):
         configs['model_args']['feat_dim'] = frontend.output_size()
         model = get_speaker_model(configs['model'])(**configs['model_args'])
         model.add_module("frontend", frontend)
+        # optional: stop the encoder after frontend_num_layers layers
+        maybe_truncate_frontend(model, configs['dataset_args'],
+                                configs['model_args'].get('nb_layer'), logger)
     else:
         model = get_speaker_model(configs['model'])(**configs['model_args'])
     if rank == 0:
@@ -268,6 +277,22 @@ def train(config='conf/config.yaml', **kwargs):
             logger.info('LEGACY grad clipping on SCALED grads (clip=%s before '
                         'unscale): effective grad norm = clip / loss_scale'
                         % configs['grad_clip'])
+    # EMA of the weights (ema_decay, e.g. 0.9999), kept on rank 0 only;
+    # built after load_checkpoint so it starts from the loaded weights
+    ema = None
+    if configs.get('ema_decay') and rank == 0:
+        ema = ModelEMA(model, configs['ema_decay'],
+                       warmup=configs.get('ema_warmup', False))
+        logger.info('EMA decay {}'.format(configs['ema_decay']))
+    # optimizer / scaler / scheduler (save_optimizer_state: true) and EMA
+    # state of the resumed epoch; absent for a fresh start or a stage
+    # hand-off (model_0.pt) -> fresh optimizer as before
+    save_optimizer_state = configs.get('save_optimizer_state', False)
+    if checkpoint is not None:
+        restore_for_resume(checkpoint, optimizer, scaler, scheduler,
+                           margin_scheduler, ema, save_optimizer_state,
+                           logger)
+
     for epoch in range(start_epoch, configs['num_epochs'] + 1):
         train_dataset.set_epoch(epoch)
 
@@ -282,14 +307,16 @@ def train(config='conf/config.yaml', **kwargs):
                   logger,
                   scaler,
                   device=device,
-                  configs=configs)
+                  configs=configs,
+                  ema=ema)
 
         if rank == 0:
             if epoch % configs['save_epoch_interval'] == 0 or epoch > configs[
                     'num_epochs'] - configs['num_avg']:
-                save_checkpoint(
-                    model, os.path.join(model_dir,
-                                        'model_{}.pt'.format(epoch)))
+                save_epoch_artifacts(
+                    model_dir, epoch, model, optimizer, scaler, scheduler,
+                    margin_scheduler, ema, save_optimizer_state,
+                    configs.get('keep_all_train_states', False))
 
     if rank == 0:
         final_link = os.path.join(model_dir, 'final_model.pt')
