@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import torch
 import logging
 
@@ -92,4 +94,8 @@ def save_checkpoint(model: torch.nn.Module, path: str):
         state_dict = model.module.state_dict()
     else:
         state_dict = model.state_dict()
-    torch.save(state_dict, path)
+    # write-then-rename so a job killed mid-save never leaves a truncated
+    # model_N.pt that a resume would pick up
+    tmp_path = path + '.tmp'
+    torch.save(state_dict, tmp_path)
+    os.replace(tmp_path, path)

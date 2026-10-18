@@ -8,8 +8,12 @@
 #   CKPT_REPO= bash local/prepare_assets.sh # base model only (skip checkpoint)
 #
 # Base model: official facebook/w2v-bert-2.0 (this recipe's copy is
-# bit-identical, sha256 eb890c96...); conf/config_baseline.json only ADDS
-# pruning fields on top of the official config.json and ships in git.
+# bit-identical, sha256 eb890c96...). The w2vbert_sv frontend loads it with
+# transformers.Wav2Vec2BertModel (transformers>=4.52) from config.json +
+# model.safetensors; preprocessor_config.json is only read by the
+# feature_extractor: hf path. conf/config_baseline.json (official config plus
+# the old pruning fields) is no longer read by the code and is copied only
+# for history / older checkouts.
 # Released checkpoint: JYP2024/wespeaker-mhfa-W2VB-ft-v2 — a full exp upload
 # (avg_model.pt + vox1/vox2_dev reference embeddings), public on the HF Hub.
 

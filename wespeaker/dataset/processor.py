@@ -244,8 +244,12 @@ def spk_to_id(data, spk2id):
         assert 'spk' in sample
         if sample['spk'] in spk2id:
             label = spk2id[sample['spk']]
+        elif len(spk2id) == 0:
+            label = -1  # extraction: no label needed
         else:
-            label = -1
+            # speaker removed from train_label (excluded) but still
+            # present in the shards: drop the sample instead of feeding -1
+            continue
         sample['label'] = label
         yield sample
 

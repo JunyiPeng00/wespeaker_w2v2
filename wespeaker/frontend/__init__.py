@@ -29,10 +29,10 @@ except ImportError:
 
 
 def _w2vbert_sv_frontend(*args, **kwargs):
-    # Lazy factory: only import the custom W2V-BERT 2.0 modeling code
-    # (wespeaker/frontend/wav2vecbert) when this frontend is requested.
-    from .get_hf_w2vbert_pruning import HuggingfaceFrontend_w2vbert
-    return HuggingfaceFrontend_w2vbert(*args, **kwargs)
+    # Lazy factory: only import transformers' Wav2Vec2BertModel when this
+    # frontend is requested.
+    from .w2vbert_sv import W2VBertSVFrontend
+    return W2VBertSVFrontend(*args, **kwargs)
 
 
 frontend_class_dict = {

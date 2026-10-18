@@ -42,6 +42,14 @@ def extract(config='conf/config.yaml', **kwargs):
     # Since the input length is not fixed, we set the built-in cudnn
     # auto-tuner to False
     torch.backends.cudnn.benchmark = False
+    # Inference precision is independent of the training knobs so the eval
+    # protocol stays fp32 unless explicitly asked: --extract_amp True
+    # [--extract_amp_dtype bfloat16] [--extract_tf32 True].
+    if configs.get('extract_tf32', False):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    enable_amp = bool(configs.get('extract_amp', False))
+    amp_dtype = getattr(torch, configs.get('extract_amp_dtype', 'bfloat16'))
 
     test_conf = copy.deepcopy(configs['dataset_args'])
     frontend_type = test_conf.get('frontend', 'fbank')
@@ -120,20 +128,25 @@ def extract(config='conf/config.yaml', **kwargs):
                     wavs = wavs.squeeze(1).float().to(device)  # (B,W)
                     wavs_len = torch.LongTensor([wavs.shape[1]]).repeat(
                         wavs.shape[0]).to(device)  # (B)
-                    features, _ = model.frontend(wavs, wavs_len)
+                    with torch.autocast('cuda', enabled=enable_amp,
+                                        dtype=amp_dtype):
+                        features, _ = model.frontend(wavs, wavs_len)
 
-                # apply cmvn
-                if test_conf.get('cmvn', True):
-                    features = apply_cmvn(features,
-                                          **test_conf.get('cmvn_args', {}))
-                # spec augmentation
-                if test_conf.get('spec_aug', False):
-                    features = spec_aug(features, **test_conf['spec_aug_args'])
+                with torch.autocast('cuda', enabled=enable_amp,
+                                    dtype=amp_dtype):
+                    # apply cmvn
+                    if test_conf.get('cmvn', True):
+                        features = apply_cmvn(
+                            features, **test_conf.get('cmvn_args', {}))
+                    # spec augmentation
+                    if test_conf.get('spec_aug', False):
+                        features = spec_aug(features,
+                                            **test_conf['spec_aug_args'])
 
-                # Forward through model
-                outputs = model(features)  # embed or (embed_a, embed_b)
+                    # Forward through model
+                    outputs = model(features)  # embed or (embed_a, embed_b)
                 embeds = outputs[-1] if isinstance(outputs, tuple) else outputs
-                embeds = embeds.cpu().detach().numpy()  # (B,F)
+                embeds = embeds.float().cpu().detach().numpy()  # (B,F)
 
                 for i, utt in enumerate(utts):
                     embed = embeds[i]

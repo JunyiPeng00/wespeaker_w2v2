@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
 import os
 import re
 from pprint import pformat
@@ -45,6 +46,11 @@ def train(config='conf/config.yaml', **kwargs):
     """
     configs = parse_config_or_kwargs(config, **kwargs)
     checkpoint = configs.get('checkpoint', None)
+    # NVIDIA-specific knobs (all default off to keep other recipes unchanged)
+    if configs.get('tf32', False):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = configs.get('cudnn_benchmark', False)
     # dist configs
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     rank = int(os.environ.get('RANK', 0))
@@ -55,13 +61,14 @@ def train(config='conf/config.yaml', **kwargs):
 
     model_dir = os.path.join(configs['exp_dir'], "models")
     if rank == 0:
-        try:
-            os.makedirs(model_dir)
-        except IOError:
-            print("[warning] " + model_dir + " already exists !!!")
-            if checkpoint is None:
-                print("[error] checkpoint is null !")
-                exit(1)
+        # An existing (possibly pre-created) directory is fine; refuse only to
+        # overwrite saved epochs without an explicit --checkpoint.
+        os.makedirs(model_dir, exist_ok=True)
+        if checkpoint is None and glob.glob(
+                os.path.join(model_dir, 'model_*.pt')):
+            print("[error] " + model_dir + " already holds model_*.pt "
+                  "but no --checkpoint was given !")
+            exit(1)
     dist.barrier(device_ids=[gpu])  # let the rank 0 mkdir first
 
     logger = get_logger(configs['exp_dir'], 'train.log')
@@ -169,7 +176,7 @@ def train(config='conf/config.yaml', **kwargs):
     if checkpoint is not None:
         load_checkpoint(model, checkpoint)
         start_epoch = int(re.findall(r"(?<=model_)\d*(?=.pt)",
-                                     checkpoint)[0]) + 1
+                                     os.path.basename(checkpoint))[0]) + 1
         logger.info('Load checkpoint: {}'.format(checkpoint))
     else:
         start_epoch = 1
@@ -177,7 +184,8 @@ def train(config='conf/config.yaml', **kwargs):
 
     # ddp_model
     model.cuda()
-    ddp_model = torch.nn.parallel.DistributedDataParallel(model)
+    ddp_model = torch.nn.parallel.DistributedDataParallel(
+        model, **configs.get('ddp_args', {}))
     device = torch.device("cuda")
 
     criterion = getattr(torch.nn, configs['loss'])(**configs['loss_args'])
@@ -239,7 +247,27 @@ def train(config='conf/config.yaml', **kwargs):
             logger.info(line)
     dist.barrier(device_ids=[gpu])  # synchronize here
 
-    scaler = torch.cuda.amp.GradScaler(enabled=configs['enable_amp'])
+    # bfloat16 autocast needs no loss scaling; the scaler is only active for
+    # float16 (amp_dtype: float16 | bfloat16, default float16).
+    amp_dtype = getattr(torch, configs.get('amp_dtype', 'float16'))
+    scaler = torch.amp.GradScaler(
+        'cuda', enabled=configs['enable_amp'] and amp_dtype == torch.float16)
+    if (configs.get('grad_norm_adam') or {}).get('enable', False):
+        assert not scaler.is_enabled() and not configs.get(
+            'grad_clip_on_scaled_grads', False), (
+            'grad_norm_adam is the explicit form of the legacy regime: use it '
+            'with bfloat16/fp32 (GradScaler off) and without the legacy flag')
+        if rank == 0:
+            logger.info('grad_norm_adam (explicit legacy-equivalent): %s'
+                        % configs['grad_norm_adam'])
+    if configs.get('grad_clip_on_scaled_grads', False):
+        assert scaler.is_enabled() and configs.get('grad_clip'), (
+            'grad_clip_on_scaled_grads replicates the legacy the original '
+            'loop and needs enable_amp True, amp_dtype float16 and grad_clip')
+        if rank == 0:
+            logger.info('LEGACY grad clipping on SCALED grads (clip=%s before '
+                        'unscale): effective grad norm = clip / loss_scale'
+                        % configs['grad_clip'])
     for epoch in range(start_epoch, configs['num_epochs'] + 1):
         train_dataset.set_epoch(epoch)
 
@@ -264,8 +292,10 @@ def train(config='conf/config.yaml', **kwargs):
                                         'model_{}.pt'.format(epoch)))
 
     if rank == 0:
-        os.symlink('model_{}.pt'.format(configs['num_epochs']),
-                   os.path.join(model_dir, 'final_model.pt'))
+        final_link = os.path.join(model_dir, 'final_model.pt')
+        if os.path.lexists(final_link):
+            os.remove(final_link)
+        os.symlink('model_{}.pt'.format(configs['num_epochs']), final_link)
         logger.info(tp.bottom(len(header), width=10, style='grid'))
 
 
