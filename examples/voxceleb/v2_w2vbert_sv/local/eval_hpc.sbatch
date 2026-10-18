@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name   eval_vox1
 ##SBATCH --account    <your_account>   # set your Slurm account and remove one #
-#SBATCH --partition  gpu
-#SBATCH --gpus-per-node 8
+#SBATCH --partition  gpu_short
+#SBATCH --gpus-per-node 2
 #SBATCH --nodes      1
-#SBATCH --time       2:00:00
+#SBATCH --time       1:00:00
 #SBATCH --output     logs/%x_%j.out
 # Frozen evaluation protocol: fp32 extraction, whole utterance truncated to MAXSEC, vox1-O/E/H cleaned trials,
 # cosine + vox2_dev mean-norm.
@@ -23,8 +23,11 @@ cd "${SLURM_SUBMIT_DIR:-.}" || exit 1   # submit from examples/voxceleb/v2_w2vbe
 MAXSEC=${MAXSEC:-10}; TAG=${TAG:-eval}
 NG=${SLURM_GPUS_ON_NODE:-8}; GL="[$(seq -s, 0 $((NG-1)))]"   # works with --gpus N as well as a full node
 [ -f "$MODEL" ] && [ -f "$EXP/config.yaml" ] || { echo "need EXP (with config.yaml) and MODEL"; exit 1; }
-EXT=""; if [ "${EXTRACT_DTYPE:-fp32}" != "fp32" ] || [ "${EXTRACT_BATCH_SEC:-0}" != "0" ]; then
-  EXT="_${EXTRACT_DTYPE:-fp32}-$([ "${EXTRACT_BATCH_SEC:-0}" != "0" ] && echo rag || echo b1)"; fi   # protocol id; default fp32-b1 keeps old names
+# Default protocol: TF32 + masked length-sorted batching (320 s budget),
+# 2 GPUs on gpu_short. Old protocol: EXTRACT_DTYPE=fp32 EXTRACT_BATCH_SEC=0 (keeps the old, untagged dir names).
+EXTRACT_DTYPE=${EXTRACT_DTYPE:-tf32}; EXTRACT_BATCH_SEC=${EXTRACT_BATCH_SEC:-320}; export EXTRACT_DTYPE EXTRACT_BATCH_SEC
+EXT=""; if [ "$EXTRACT_DTYPE" != "fp32" ] || [ "$EXTRACT_BATCH_SEC" != "0" ]; then
+  EXT="_${EXTRACT_DTYPE}-$([ "$EXTRACT_BATCH_SEC" != "0" ] && echo rag || echo b1)"; fi   # protocol id in the eval dir name
 E=$EXP/eval_${TAG}${EXT}_max${MAXSEC}s; mkdir -p $E
 python - "$EXP/config.yaml" "$E/config.yaml" "$MAXSEC" <<'PY'
 import os, sys, yaml
@@ -35,11 +38,12 @@ if fe == 'w2vbert_sv':
     c['dataset_args'][fe + '_args'].setdefault('feature_extractor', 'torch')
 for k in ['extract_amp', 'extract_tf32']: c[k] = False   # frozen protocol: fp32
 # EXTRACT_DTYPE fp32 (protocol) | tf32 | bf16 ; EXTRACT_BATCH_SEC > 0 = masked length-sorted batching of whole utterances
-dt = os.environ.get('EXTRACT_DTYPE', 'fp32')
+dt = os.environ.get('EXTRACT_DTYPE', 'tf32')
 if dt == 'tf32': c['extract_tf32'] = True
 elif dt == 'bf16': c['extract_amp'] = True; c['extract_amp_dtype'] = 'bfloat16'
 elif dt != 'fp32': sys.exit('EXTRACT_DTYPE must be fp32|tf32|bf16')
-c['extract_batch_seconds'] = float(os.environ.get('EXTRACT_BATCH_SEC', '0'))
+c['extract_batch_seconds'] = float(os.environ.get('EXTRACT_BATCH_SEC', '320'))
+c['dataset_args'].pop('num_frms_choices', None)   # vox2-mean crops: the config's fixed num_frms, never the training crop mix
 yaml.safe_dump(c, open(sys.argv[2], 'w'))
 PY
 echo "== $(date) job=$SLURM_JOB_ID EXP=$EXP MODEL=$MODEL TAG=$TAG MAXSEC=$MAXSEC EXTRACT_DTYPE=${EXTRACT_DTYPE:-fp32} EXTRACT_BATCH_SEC=${EXTRACT_BATCH_SEC:-0} VOX2_SCP=${VOX2_SCP:-<extract>}"
@@ -62,7 +66,7 @@ else
   fi
   bash tools/extract_embedding.sh --exp_dir $E --model_path $MODEL --data_type shard \
     --data_list $V2LIST --wavs_num $V2N --store_dir vox2_dev \
-    --batch_size 16 --num_workers 4 --nj $NG --gpus "$GL"
+    --batch_size ${VOX2_BS:-64} --num_workers 4 --nj $NG --gpus "$GL"
   echo "== vox2_dev extraction $(( $(date +%s) - T1 )) s"; cat $E/embeddings/vox2_dev/extract.result
 fi
 grep -q Successfully $E/embeddings/vox1/extract.result || { echo "EVAL FAIL: vox1 extraction incomplete"; exit 1; }
