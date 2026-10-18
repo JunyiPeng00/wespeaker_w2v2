@@ -83,6 +83,15 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$NGPU \
     --noise_data $NOISE \
     $CKPT_ARG &
 TRAIN_PID=$!
+# STOP_AFTER_EPOCH=1: run exactly one epoch per job (gpu_short 1 h segments chained with --dependency=afterany):
+# once the next epoch's model + EMA + train_state are on disk (train_state is written last), stop the trainer;
+# the next segment resumes from it. The last epoch is never interrupted, so averaging still happens.
+if [ "${STOP_AFTER_EPOCH:-0}" = "1" ]; then
+  NEXT=$(( ${CKPT:-0} + 1 ))
+  ( while [ ! -f $EXP/models/train_state_${NEXT}.pt ] && kill -0 $TRAIN_PID 2>/dev/null; do sleep 20; done
+    if [ -f $EXP/models/train_state_${NEXT}.pt ] && [ $NEXT -lt $NUM_EPOCHS ]; then
+      sleep 30; echo "== $(date) epoch $NEXT saved (model + train_state), stopping this segment"; kill $TRAIN_PID; fi ) &
+fi
 wait $TRAIN_PID; RC=$?
 echo "== $(date) train.py exit code $RC"; ls -la $EXP/models/
 if [ $RC -eq 0 ] && [ -f $EXP/models/model_${NUM_EPOCHS}.pt ]; then
