@@ -16,6 +16,7 @@
 
 import argparse
 import glob
+import os
 import re
 
 import torch
@@ -48,8 +49,10 @@ def get_args():
 def main():
     args = get_args()
 
-    path_list = glob.glob('{}/[!avg][!final][!convert]*.pt'.format(
-        args.src_path))
+    # only epoch checkpoints model_<N>.pt (train_state_<N>.pt, ema_model_<N>.pt,
+    # avg/final/convert files are not averaged)
+    path_list = [p for p in glob.glob('{}/model_*.pt'.format(args.src_path))
+                 if re.fullmatch(r'model_\d+\.pt', os.path.basename(p))]
     path_list = sorted(
         path_list,
         key=lambda p: int(re.findall(r"(?<=model_)\d*(?=.pt)", p)[0]))
