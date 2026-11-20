@@ -203,6 +203,32 @@ What two runs of the same config, seed and number of processes share:
   model started from; `local/init/README.md` lists what is identical and
   what differs.
 
+## Deliberate differences from the reference implementation
+
+The recipe reproduces the implementation the reference model was trained
+with (`tests/parity/README.md`: sampler stream, batches, schedule, losses
+and gradients are bit-identical on CPU). It differs on purpose in these
+points, none of which changes a normal training step of the first epoch:
+
+* **Head:** class cosines are clamped to `[-1 + 1e-7, 1 - 1e-7]` before the
+  square root of the margin formula; without it a cosine of exactly 1 gives
+  NaN gradients.
+* **Running centre of the pair-AUC term:** a non-finite row mean is skipped
+  and counted instead of entering the running mean.
+* **Codec chain:** a row whose codec call failed is marked `chain_fail`, not
+  as having passed the codec; failures are counted and logged.
+* **Logging:** the first process writes the table; loss and accuracy are
+  means over all processes; `Lr` is the learning rate of the back-end and
+  head, `LrFE` that of the encoder.
+* **Stopping and resuming:** see above; generators are reseeded per epoch,
+  and a run can be stopped inside an epoch.
+* **Drift gate:** a gate that cannot be evaluated stops the run.
+* **Sampler statistics:** printed at the end of every worker's epoch, with
+  the number of speakers repeated inside an episode. Small arms can repeat
+  speakers: every (process, worker) pair draws from its own share of the
+  speakers, and an arm with few speakers may have fewer in a share than an
+  episode asks for. This is the behaviour of the reference run and is kept.
+
 ## Tests
 
 ```bash
