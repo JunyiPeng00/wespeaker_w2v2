@@ -8,3 +8,5 @@ __pycache__/
 /data/
 /exp/
 /assets/
+/local/slurm/site.env
+/logs/

@@ -20,7 +20,7 @@ from test_build import (PARITY_REF, RUN_DIR, SOURCE_RECIPE, TINY_CLASSES,
                         run_source, tiny_config, write_tiny_legacy)
 
 from ovsb.config import schema
-from ovsb.engine.logging import row_line
+from ovsb.engine.console import row_line
 from ovsb.engine.optim import (build_optimizer, build_schedulers,
                                learning_rates)
 from ovsb.model.build import build_model

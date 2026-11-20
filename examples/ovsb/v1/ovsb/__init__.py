@@ -10,5 +10,7 @@ Layers, lowest first; a layer imports only the layers listed for it:
 * ``ovsb.losses``  - loss functions on tensors (torch only).
 * ``ovsb.engine``  - training step, loop, checkpoints (all layers above,
   ``wespeaker.utils``).
+* ``ovsb.api``     - construction functions for scripts and tests, and
+  the one construction path of a training process (all layers above).
 * ``ovsb.bin``     - command-line entry points (any layer).
 """

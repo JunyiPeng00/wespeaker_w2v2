@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from ovsb.config.schema import AUG_TYPES, CODECS, Config
-from ovsb.engine.logging import all_reduce_sum
+from ovsb.engine.console import all_reduce_sum
 
 _BASE = ('rows', 'ce_sum', 'correct', 'views', 'zr_lsb50', 'zr_run',
          'zr_dith', 'zr_byp', 'chain', 'eg_rows', 'eg_redraw', 'eg_fail')

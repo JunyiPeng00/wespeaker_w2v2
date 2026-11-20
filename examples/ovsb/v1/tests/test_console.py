@@ -9,8 +9,8 @@ import torch.distributed as dist
 
 from test_build import make_tiny_assets, tiny_config
 
-from ovsb.engine import logging as elog
-from ovsb.engine.logging import (EpochMeter, Totals, all_reduce_sum,
+from ovsb.engine import console as elog
+from ovsb.engine.console import (EpochMeter, Totals, all_reduce_sum,
                                  bottom_line, detail_lines, header_lines,
                                  row_line)
 from ovsb.engine.run_meta import collect_run_meta, sha256_file, write_run_meta
