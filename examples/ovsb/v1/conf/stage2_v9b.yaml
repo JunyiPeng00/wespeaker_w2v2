@@ -1,0 +1,6 @@
+# stage2_v9c with 9 epochs.
+base: stage2_v9c.yaml
+
+run:
+  exp_dir: exp/stage2_v9b
+  num_epochs: 9

@@ -1,0 +1,23 @@
+# Continuation of stage2_v9c from its last epoch: 3 epochs at 0.3 x the peak
+# learning rate with the cn1 arm at 40 % of the draws.
+base: stage2_v9c.yaml
+
+run:
+  exp_dir: exp/cont_c40
+  num_epochs: 3
+
+data:
+  sampler:
+    arms:
+      vox2: {weight: 0.1184}
+      vb2: {weight: 0.1339}
+      3dspeaker: {weight: 0.0989}
+      cn1: {weight: 0.40}
+
+model:
+  init:
+    checkpoint: exp/stage2_v9c/models/model_14.pt
+
+optim:
+  initial_lr: 5.0e-06
+  warm_up_epoch: 0.1

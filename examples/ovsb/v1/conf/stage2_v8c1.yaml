@@ -1,0 +1,13 @@
+# stage2_v9c with 9 epochs and the cn1 arm at 15 % of the draws.
+base: stage2_v9c.yaml
+
+run:
+  exp_dir: exp/stage2_v8c1
+  num_epochs: 9
+
+data:
+  sampler:
+    arms:
+      vb2: {weight: 0.2339}
+      cn2: {weight: 0.1039}
+      cn1: {weight: 0.15}

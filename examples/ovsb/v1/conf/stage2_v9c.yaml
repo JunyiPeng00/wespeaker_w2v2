@@ -1,0 +1,187 @@
+# Stage 2: full fine-tuning of W2V-BERT 2.0 (22 layers) + MHFA on the
+# multi-corpus list with the episodic P x K sampler.
+#
+# Paths are relative to the recipe directory; data/ and assets/ are created
+# by the data and asset preparation stages of run.sh. Other stage-2 configs
+# (stage2_v8c1, stage2_v9a, stage2_v9b, cont_c40) overlay this file.
+
+run:
+  exp_dir: exp/stage2_v9c
+  seed: 716
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]   # one process per GPU
+  num_epochs: 14
+  save_epoch_interval: 1
+  log_batch_interval: 100
+  num_avg: 1                       # the last epoch is the final model
+
+data:
+  lists:
+    train_label: data/train/utt2spk          # its speakers are the classes
+    index: data/train/tar_index
+    spk2corpus: data/train/spk2corpus
+    spk2lang: data/train/spk2lang
+
+  sampler:
+    P: 24                          # speakers per episode
+    K: 2                           # utterances per speaker
+    sample_num_per_epoch: 1400000  # 3645 steps at 8 x 48
+    vox2_lang: en                  # language assigned to every vox2 speaker
+    stratify: systematic
+    log_every: 500
+    arms:                          # weight = share of the speaker draws
+      vox2: {weight: 0.1684, corpus: [vox2]}
+      vb2: {weight: 0.1839, corpus: [vb2]}
+      cn2: {weight: 0.0539, corpus: [cn2]}
+      mandarin_t1:
+        weight: 0.0748
+        corpus: [a1, a3, mgd, ramc, aishell1, aishell3, magicdata]
+      3dspeaker: {weight: 0.1489, corpus: [3ds, 3dspeaker]}
+      kespeech: {weight: 0.0401, corpus: [kespeech]}
+      tvx: {weight: 0.08, corpus: [tvx]}
+      cn1: {weight: 0.25, corpus: [cn1]}
+    cells:
+      vb2_zh:                      # 4 % of all draws: Chinese vb2 speakers
+        arm: vb2
+        share: 0.04
+        select: {spk2lang: zh}
+    forbid_same_segment: true      # the K rows come from different segments
+    policies:                      # arms not listed: K random utterances
+      3dspeaker:                   # other segment, device and distance
+        pair_policy: contrast
+        p_dialect: 0.5             # standard + dialect pair when both exist
+        segment_first: true
+        dialect_mass: {boost: 3.0, cap_x_median: 8}
+      cn2:                         # other genre
+        pair_policy: contrast
+        w_bridge: 2.0              # weight of speakers with >= 2 genres
+      cn1:
+        pair_policy: contrast
+        w_bridge: 2.0
+      mandarin_t1:                 # other session
+        pair_policy: xsession
+        spk_weight_file: data/train/t1_province_weights.txt
+        spk_weight_share: 0.5      # draws going to the listed speakers
+      kespeech:                    # other recording phase / sub-dialect
+        pair_policy: ks_contrast
+        p_dialect: 0.5
+        subdialect_file: data/train/ks_meta/utt2subdialect
+
+  filter:
+    min_sec: 1.0                   # shorter utterances are dropped
+    max_sec: 8.0                   # longer ones: a random 8 s chunk
+
+  crop:
+    # one cap per batch, drawn from [seconds, weight]
+    max_secs: [[2.0, 0.15], [3.0, 0.45], [4.0, 0.25], [6.0, 0.15]]
+    min_sec: 0.5
+    full_prob: 0.5                 # rows cropped to the full cap
+    onset_prob: 0.5                # short crops starting at a speech onset
+    onset_max_sec: 1.0
+    pair_prob: 0.25                # batches of (anchor, short view) pairs
+    pair_anchor_sec: 6.0
+    pair_view_secs: [0.5, 2.0]
+    pair_view_onset_prob: 1.0
+    arm_caps:                      # per-arm row caps (shorter than the batch)
+      cn2: [[2.0, 0.3], [3.0, 0.4], [4.0, 0.2], [6.0, 0.1]]
+      cn1: [[2.0, 0.3], [3.0, 0.4], [4.0, 0.2], [6.0, 0.1]]
+    energy_gate:                   # redraw short crops that are mostly silent
+      gate_below_sec: 1.5
+      min_active_frac: 0.5
+      max_redraws: 4
+
+  zero_run_dither:                 # +-1 LSB over runs of exact zeros
+    arms: null                     # every arm
+    min_run_ms: 50.0
+    lsb_level: 4.0
+    dither_lsb: 1.0
+
+  augment:
+    probs: {noise: 0.2, reverb: 0.2, reverb_noise: 0.2}   # rest: clean
+    arm_probs:                     # no reverberation on these arms
+      cn2: {noise: 0.2}
+      3dspeaker: {noise: 0.2}
+      tvx: {noise: 0.2}
+      cn1: {noise: 0.2}
+    reverberant_noise: true        # noise passes through its own RIR
+    reverb_sources: [simulated, data/rir_real/lmdb]
+    reverb_weights: [0.5, 0.5]
+    noise_lmdb: data/musan/lmdb
+    reverb_lmdb: data/rirs/lmdb    # the 'simulated' source
+    noise_exclude_list: conf/lists/musan_exclude.txt
+
+  channel:                         # codec chain on single-session speakers
+    arms: [mandarin_t1]
+    prob: 1.0
+    kpos: [1]                      # second row of each speaker only
+    distinct: true
+    codecs: [mp3, opus, vorbis, mulaw8k, g722]
+    eq_prob: 0.6
+    eq_gain_db: 6.0
+    bandlimit_prob: 0.4
+    clip_prob: 0.0
+    clip_level: [0.3, 0.7]
+    loss_prob: 0.0
+    loss_rate: [0.02, 0.08]
+    isolate_ffmpeg: true           # FFmpeg runs in a helper process
+
+  loader:
+    batch_size: 48                 # per GPU; must equal P x K
+    num_workers: 12
+    prefetch_factor: 8
+    pin_memory: false
+    drop_last: true
+
+  resample_rate: 16000
+  num_frms: 150                    # fixed-length batched extraction only
+
+model:
+  frontend:
+    assets: assets/w2v-bert-2.0
+    num_layers: 22                 # of 24 encoder layers
+    gradient_checkpointing: true
+    time_mask: {prob: 0.05, span: 10}
+  backend:
+    name: SSL_BACKEND_MHFA_LayerNorm
+    head_nb: 64
+    embed_dim: 256
+    compression_dim: 128
+    feature_grad_mult: 1.0
+    nb_layer: 23                   # num_layers + 1 hidden states
+    feat_dim: 1024
+  head:
+    scale: 32.0
+    K: 3                           # sub-centres per class
+    k_top: 5
+    mp: 0.06
+    margin: 0.2
+    duration_margin_ref_sec: 3.0   # shorter crops: proportionally less margin
+  init:
+    checkpoint: exp/init/stage2_init.pt
+    head_check: required           # head rows must match the training list
+
+loss:
+  consistency_weight: 0.5          # short view -> its anchor (stop-gradient)
+  pair_auc:
+    weight: 0.2
+    scale: 16.0
+    center: {arm: vox2, momentum: 0.99, warmup: 20}
+
+optim:
+  optimizer: AdamW
+  weight_decay: 0.0001
+  fused: true
+  scheduler: ExponentialDecrease
+  initial_lr: 1.6667e-05           # x 6 (global batch 384 / 64) = 1e-4
+  final_lr: 8.333e-07
+  warm_up_epoch: 0.14
+  warm_from_zero: true
+  frontend_lr_ratio: 0.3           # encoder learning rate / backend
+  frontend_modules: [frontend]
+  grad_clip: 1.0
+
+engine:
+  amp_dtype: bfloat16
+  tf32: true
+  cudnn_benchmark: true
+  ddp: {gradient_as_bucket_view: true, static_graph: true}
+  save_optimizer_state: true
