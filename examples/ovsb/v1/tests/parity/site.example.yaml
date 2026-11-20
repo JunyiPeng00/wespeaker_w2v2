@@ -1,0 +1,34 @@
+# Site file of the parity gate: where the data of the reference run is on
+# this machine. Copy it outside the repository and fill in the paths.
+
+# Working directory of the dump. Relative paths below, and the relative
+# paths inside the reference run's config, resolve against it: the recipe
+# directory of the original training tree.
+recipe_dir: /path/to/original_tree/recipe_dir
+
+# Checkpoint of the reference run that the model check loads (the one the
+# reference dump used). Its directory must hold the run's head record.
+checkpoint: exp/RUN/models/model_14.pt
+
+# The config the reference run saved and the conf it was launched with
+# (config_port section: both are compared with conf/stage2_v9c.yaml).
+legacy_saved: exp/RUN/config.yaml
+legacy_authored: conf/RUN_CONF.yaml
+
+# Overrides of conf/stage2_v9c.yaml (dotted path: value). Only locations:
+# every other value must be the one of the recipe config.
+overrides:
+  data.lists.train_label: data/TRAIN_LIST/utt2spk
+  data.lists.index: data/TRAIN_LIST/tar_index
+  data.lists.spk2corpus: data/TRAIN_LIST/spk2corpus
+  data.lists.spk2lang: data/TRAIN_LIST/spk2lang
+  data.sampler.policies.mandarin_t1.spk_weight_file: data/TRAIN_LIST/t1_province_weights.txt
+  data.sampler.policies.kespeech.subdialect_file: data/TRAIN_LIST/ks_meta/utt2subdialect
+  data.augment.noise_lmdb: data/musan/lmdb
+  data.augment.reverb_lmdb: data/rirs/lmdb
+  data.augment.reverb_sources: [simulated, /path/to/rir_real/lmdb]
+  # the copy of the exclusion list in this repository (absolute path:
+  # the working directory is not this recipe)
+  data.augment.noise_exclude_list: /path/to/this_repo/examples/ovsb/v1/conf/lists/musan_exclude.txt
+  model.frontend.assets: assets/w2v-bert-2.0
+  model.init.checkpoint: exp/RUN/models/model_0.pt
