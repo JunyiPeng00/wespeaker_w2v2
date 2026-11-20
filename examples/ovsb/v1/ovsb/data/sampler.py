@@ -604,7 +604,7 @@ class EpisodicSampler(IterableDataset):
                                     st.redistributed) if e})]
         pt = st.ptype.sum(0)
         out.append('%s: positive types %s' % (head, {
-            PTYPES[j]: round(int(pt[j]) / max(1, pt.sum()), 4)
+            PTYPES[j]: round(int(pt[j]) / max(1, int(pt.sum())), 4)
             for j in range(len(PTYPES)) if pt[j]}))
         if self.table.share_cells:
             out.append('%s: cells %s' % (head, self.cell_stats(st)))
