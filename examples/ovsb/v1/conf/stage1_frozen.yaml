@@ -1,0 +1,118 @@
+# Stage 1: MHFA backend and classifier head on a frozen W2V-BERT 2.0 encoder
+# (24 layers), 25 epochs on VoxCeleb2 dev + VoxBlink2, shard pipeline.
+#
+# A wespeaker-schema config for the stock trainer (not the recipe trainer):
+#
+#   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
+#     wespeaker/bin/train.py --config conf/stage1_frozen.yaml \
+#       --exp_dir exp/stage1_frozen --gpus "[0,1,2,3,4,5,6,7]" --num_avg 3 \
+#       --data_type shard --train_data data/stage1/shard.list \
+#       --train_label data/stage1/utt2spk \
+#       --reverb_data data/rirs/lmdb --noise_data data/musan/lmdb
+#
+# The speakers of --train_label are the classes; utterances of other speakers
+# in the shards are skipped. local/init/build_init.sh starts from the model
+# of the last epoch (models/model_25.pt), as the reference run did; the
+# average of the last 3 epochs (num_avg) is written but not used by stage 2.
+#
+# The schedules are derived from num_epochs and the list size: do not change
+# num_epochs or the number of GPUs between resumed segments. With 8 GPUs and
+# batch 128 the learning rate is scaled by 8 * 128 / 64 = 16.
+
+exp_dir: exp/stage1_frozen
+gpus: "[0,1,2,3,4,5,6,7]"
+num_avg: 3
+save_optimizer_state: true     # exact resume with --checkpoint
+enable_amp: true
+amp_dtype: bfloat16
+tf32: true
+cudnn_benchmark: true
+ddp_args:
+  gradient_as_bucket_view: true
+  static_graph: true
+do_lm: false
+
+seed: 716
+num_epochs: 25
+save_epoch_interval: 1
+log_batch_interval: 100
+
+dataloader_args:
+  batch_size: 128
+  num_workers: 12
+  pin_memory: false
+  prefetch_factor: 8
+  drop_last: true
+
+dataset_args:
+  sample_num_per_epoch: 0        # 0 = every utterance of --train_label
+  shuffle: true
+  shuffle_args:
+    shuffle_size: 2500
+  filter: true
+  filter_args:
+    min_num_frames: 50
+    max_num_frames: 400
+  resample_rate: 16000
+  speed_perturb: false
+  num_frms: 150                  # 3 s crops
+  aug_prob: 0.6                  # reverberation or additive noise
+  frontend: w2vbert_sv
+  w2vbert_sv_args:
+    upstream_args:
+      name: config_baseline.json
+      path_or_url: assets/w2v-bert-2.0
+    feature_extractor: torch
+    frozen: true
+    frame_shift: 20
+    frame_length: 20
+  cmvn: false
+  cmvn_args:
+    norm_mean: false
+    norm_var: false
+  spec_aug: false
+  spec_aug_args:
+    num_t_mask: 1
+    num_f_mask: 1
+    max_t: 10
+    max_f: 8
+    prob: 0.6
+
+model: SSL_BACKEND_MHFA_LayerNorm
+model_init: null
+model_args:
+  feat_dim: -1                   # set from the frontend (1024)
+  head_nb: 64
+  embed_dim: 256
+  compression_dim: 128
+  feature_grad_mult: 0.0
+  nb_layer: 25                   # 24 encoder layers + the input of layer 1
+
+projection_args:
+  project_type: arc_margin_intertopk_subcenter   # K 3, k_top 5, mp 0.06
+  scale: 32.0
+  easy_margin: false
+
+margin_scheduler: MarginScheduler
+margin_update:
+  initial_margin: 0.0
+  final_margin: 0.2
+  increase_start_epoch: 3
+  fix_start_epoch: 17
+  update_margin: true
+  increase_type: exp
+
+loss: CrossEntropyLoss
+loss_args: {}
+
+optimizer: AdamW
+optimizer_args:
+  weight_decay: 1.0e-7
+  fused: true
+
+scheduler: ExponentialDecrease
+scheduler_args:
+  initial_lr: 1.0e-3
+  final_lr: 5.0e-5
+  warm_up_epoch: 3
+  warm_from_zero: true

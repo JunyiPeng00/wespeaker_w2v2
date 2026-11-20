@@ -1,0 +1,156 @@
+# Training list of the stage-2 recipe (152,367 speakers, 7,824,864 utterances).
+#
+# Read by local/data/build_train_list.py. Every `input`, `utt2spk`, `index`,
+# `alias` and `shard_list` value is a logical name; the site file given with
+# --site maps the names to paths (see site_paths.example.yaml).
+#
+# The order of `corpora` is the order of the rows of utt2spk and of the merged
+# tar index; do not reorder.
+
+min_sec: 1.0     # utterances shorter than this are dropped (from the index)
+min_utts: 2      # speakers left with fewer utterances are dropped
+
+corpora:
+  # VoxCeleb2 dev + VoxBlink2: a prepared list, taken as it is. Its
+  # benchmark-lookalike and held-out speakers were removed and its duplicate
+  # identities relabelled when it was made (base.alias records the latter).
+  - name: base
+    tag: vox2
+    tag_prefix: {vb2_: vb2}        # labels vb2_* -> corpus vb2
+    filter: false
+    utt2spk: base.utt2spk
+    index: base.index
+    keep_shard_paths: true         # relative to the site's index_root
+    alias: base.alias
+    shard_list: base.shard_list
+
+  - name: cn2                      # CN-Celeb2
+    tag: cn2
+    label_prefix: cn2_
+    utt2spk: cnceleb2.utt2spk
+    index: cnceleb2.index
+    exclude:
+      - {input: cnceleb2.heldout}        # development speakers
+      - {input: cnceleb2.audit_drops}    # benchmark-overlap audit
+
+  - name: mgd                      # MagicData
+    tag: mgd
+    label_prefix: mgd_
+    utt2spk: magicdata.utt2spk
+    index: magicdata.index
+
+  - name: ramc                     # MagicData-RAMC
+    tag: ramc
+    label_prefix: ramc_
+    utt2spk: ramc.utt2spk
+    index: ramc.index
+
+  - name: a1                       # AISHELL-1
+    tag: a1
+    label_prefix: a1_
+    utt2spk: aishell1.utt2spk
+    index: aishell1.index
+
+  - name: a3                       # AISHELL-3
+    tag: a3
+    label_prefix: a3_
+    utt2spk: aishell3.utt2spk
+    index: aishell3.index
+
+  - name: 3ds                      # 3D-Speaker
+    tag: 3ds
+    label_prefix: 3ds_
+    utt2spk: 3dspeaker.utt2spk
+    index: 3dspeaker.index
+    exclude:
+      - {input: 3dspeaker.heldout}
+      - {input: 3dspeaker.audit_drops}
+
+  - name: kespeech
+    tag: kespeech
+    label_prefix: ks_
+    utt2spk: kespeech.utt2spk
+    index: kespeech.index
+    exclude:
+      - {input: kespeech.heldout}        # reserved pool
+      - input: kespeech.heldout_table    # development top-up speakers
+        format: tsv
+        column: spk
+        where: {source: topup_train}
+
+  - name: tvx                      # TidyVoiceX
+    tag: tvx
+    label_prefix: tvx_
+    sort: true
+    utt2spk: tidyvoicex.utt2spk
+    index: tidyvoicex.index
+    shard_list: tidyvoicex.shard_list
+    exclude:
+      - {input: tidyvoicex.heldout}
+      - {input: tidyvoicex.pcm_collisions, format: tsv, column: label}
+
+  # CN-Celeb1 dev. Its keys and labels use the cn2_ prefix (ids 00000-00799)
+  # so that the sampler parses the genre as for CN-Celeb2; the corpus tag
+  # tells the two apart. These speakers are the speakers of the CN-Celeb
+  # trial lists: mark results on those lists accordingly.
+  - name: cn1
+    tag: cn1
+    label_prefix: cn2_
+    sort: true
+    utt2spk: cnceleb1_dev.utt2spk
+    index: cnceleb1_dev.index
+    shard_list: cnceleb1_dev.shard_list
+
+# Identity decisions, applied to the rows kept above.
+identity:
+  drop:                            # every utterance of the speaker is removed
+    - {input: identity.drop_suspects}        # suspected duplicate identities
+    - {input: identity.drop_vox1_overlap}    # VoxBlink2 x VoxCeleb1 speakers
+    - input: identity.tvx_actions            # benchmark / held-out lookalikes
+      format: tsv
+      column: speaker
+      where: {action: drop}
+  merge:                           # duplicate relabelled to the canonical id
+    - {input: identity.merge_pairs}          # '<duplicate> <canonical>'
+    - input: identity.tvx_merges
+      format: tsv
+      duplicate: duplicate
+      canonical: canonical
+
+# spk2lang: one block per rule, speakers sorted inside a block.
+spk2lang:
+  - {corpus: vb2, source: file, input: voxblink2.spk2lang}
+  - corpus: tvx
+    source: dominant_key_field     # language = key field 1, most utterances
+    field: 1
+    map: {zh-CN: zh, hy-AM: hy}
+
+# Lines of a per-utterance file restricted to the kept keys of a corpus.
+side_files:
+  - out: ks_meta/utt2subdialect
+    input: kespeech.utt2subdialect
+    corpus: kespeech
+
+# Weight file for the Mandarin read-speech arm: the speakers of the listed
+# provinces get `share` of the speaker draws of the arm.
+speaker_weights:
+  out: t1_province_weights.txt
+  corpora: [mgd, ramc, a1, a3]
+  share: 0.5
+  table:
+    input: magicdata.spk2province  # tsv with a header
+    speaker_column: spk
+    column: province_raw
+    values: [he bei, shan dong, he nan, an hui, jiang su, liao ning]
+
+# Development / held-out speakers: the build fails if one is in the list.
+must_be_absent:
+  - {input: cnceleb2.heldout, prefix: cn2_}
+  - {input: 3dspeaker.heldout, prefix: 3ds_}
+  - {input: voxblink2.heldout_dev}
+  - {input: voxblink2.heldout_reserve}
+  - {input: voxblink2.heldout_pool}
+  - {input: voxblink2.heldout_zh}
+  - {input: kespeech.heldout}
+  - {input: kespeech.heldout_table, format: tsv, column: spk}
+  - {input: tidyvoicex.heldout}

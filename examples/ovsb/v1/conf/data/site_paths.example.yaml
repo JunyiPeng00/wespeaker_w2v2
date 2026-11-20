@@ -1,0 +1,69 @@
+# Site file for local/data/build_train_list.py: where the inputs named in
+# conf/data/s3c.yaml are on this machine. Copy it outside the repository,
+# fill in the paths and pass it with --site.
+#
+# <corpus>/ is the output directory of the conversion of one corpus to
+# wespeaker shards: utt2spk ('<key> <speaker>'), shard.list and the files
+# named below. A tar index is made with local/data/build_tar_index.sh.
+
+# Directory against which the relative shard paths of base.index resolve
+# (recorded in tar_index/meta.json; normally the recipe directory).
+index_root: /path/to/recipe_dir
+
+inputs:
+  base:
+    utt2spk: /path/to/vox2_vb2/utt2spk
+    index: /path/to/vox2_vb2/tar_index
+    alias: /path/to/vox2_vb2/spk_alias          # '<duplicate> <canonical>'
+    shard_list: /path/to/vox2_vb2/shard.list
+  cnceleb2:
+    utt2spk: /path/to/cnceleb2/utt2spk
+    index: /path/to/cnceleb2/tar_index
+    heldout: /path/to/heldout/cnceleb2.txt      # one speaker id per line
+    audit_drops: /path/to/audit/cnceleb2/drop_speakers.txt
+  magicdata:
+    utt2spk: /path/to/magicdata/utt2spk
+    index: /path/to/magicdata/tar_index
+    spk2province: /path/to/magicdata/spk2province.tsv  # spk, province_raw
+  ramc:
+    utt2spk: /path/to/ramc/utt2spk
+    index: /path/to/ramc/tar_index
+  aishell1:
+    utt2spk: /path/to/aishell1/utt2spk
+    index: /path/to/aishell1/tar_index
+  aishell3:
+    utt2spk: /path/to/aishell3/utt2spk
+    index: /path/to/aishell3/tar_index
+  3dspeaker:
+    utt2spk: /path/to/3dspeaker/utt2spk
+    index: /path/to/3dspeaker/tar_index
+    heldout: /path/to/heldout/3dspeaker.txt
+    audit_drops: /path/to/audit/3dspeaker/drop_speakers.txt
+  kespeech:
+    utt2spk: /path/to/kespeech/utt2spk
+    index: /path/to/kespeech/tar_index
+    utt2subdialect: /path/to/kespeech/utt2subdialect
+    heldout: /path/to/kespeech/heldout/exclude_from_training.txt
+    heldout_table: /path/to/kespeech/heldout/heldout_speakers.tsv  # spk, source
+  tidyvoicex:
+    utt2spk: /path/to/tidyvoicex/utt2spk
+    index: /path/to/tidyvoicex/tar_index
+    shard_list: /path/to/tidyvoicex/shard.list
+    heldout: /path/to/tidyvoicex/heldout/exclude_from_training.txt
+    pcm_collisions: /path/to/tidyvoicex/heldout/pcm_collisions.tsv  # label
+  cnceleb1_dev:
+    utt2spk: /path/to/cnceleb1_dev/utt2spk
+    index: /path/to/cnceleb1_dev/tar_index
+    shard_list: /path/to/cnceleb1_dev/shard.list
+  voxblink2:
+    spk2lang: /path/to/voxblink2/spk2lang       # '<speaker> <language>'
+    heldout_dev: /path/to/voxblink2/heldout/spk_dev.txt
+    heldout_reserve: /path/to/voxblink2/heldout/spk_reserve.txt
+    heldout_pool: /path/to/voxblink2/heldout/spk_pool.txt
+    heldout_zh: /path/to/voxblink2/heldout/spk_zh.txt
+  identity:
+    drop_suspects: /path/to/identity/drop_speakers_suspects.txt
+    drop_vox1_overlap: /path/to/identity/drop_speakers_vb2_vox1.txt
+    merge_pairs: /path/to/identity/merge_pairs.txt
+    tvx_actions: /path/to/identity/tvx_identity_actions.tsv  # speaker, action
+    tvx_merges: /path/to/identity/tvx_merges.tsv  # duplicate, canonical
