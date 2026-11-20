@@ -88,6 +88,10 @@ def extract(config='conf/config.yaml', **kwargs):
             frontend = frontend_class_dict[frontend_type](
                 **test_conf[frontend_args], sample_rate=test_conf['resample_rate'])
             model.add_module("frontend", frontend)
+            # same depth as training; no-op without frontend_num_layers
+            from wespeaker.utils.frontend_utils import maybe_truncate_frontend
+            maybe_truncate_frontend(model, test_conf,
+                                    configs['model_args'].get('nb_layer'))
         print('Loading checkpoint ...')
         load_checkpoint(model, model_path)
     print('Finished !!! Start extracting ...')

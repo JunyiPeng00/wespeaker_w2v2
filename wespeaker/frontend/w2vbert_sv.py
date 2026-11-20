@@ -177,6 +177,11 @@ class W2VBertSVFrontend(nn.Module):
             return_attention_mask=False)
         return feats.input_features.to(wav.device)
 
+    def _mask_frames(self, h: torch.Tensor,
+                     flens: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Extension point: frame masking after the feature projection."""
+        return h
+
     def forward(
         self, input_wav: torch.Tensor,
         input_lengths: Optional[torch.LongTensor] = None
@@ -198,6 +203,7 @@ class W2VBertSVFrontend(nn.Module):
             feats = self.extract_features(x)
             feats = feats.to(next(self.upstream.parameters()).dtype)
             h = self.upstream.feature_projection(feats)[0]
+            h = self._mask_frames(h)
             hidden_states = [h]
             for layer in self.upstream.encoder.layers:
                 out = layer(h)
@@ -220,6 +226,7 @@ class W2VBertSVFrontend(nn.Module):
             feats = feats.to(next(self.upstream.parameters()).dtype)
             h = self.upstream.feature_projection(feats)[0]
             h = h.masked_fill(~mask.unsqueeze(-1), 0.0)
+            h = self._mask_frames(h, flens)
             ext = (1.0 - mask[:, None, None, :].to(h.dtype)) \
                 * torch.finfo(h.dtype).min
             ext = ext.expand(-1, 1, mask.shape[1], mask.shape[1])
