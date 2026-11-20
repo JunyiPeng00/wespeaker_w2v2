@@ -6,6 +6,11 @@ first and the rest of the file is merged into it: mappings are merged key
 by key, any other value (scalar, list) replaces the base value. A base may
 itself have a base.
 
+The order of ``data.sampler.arms`` (and ``cells``) is behaviour. Merging
+keeps it: an entry the overlay changes stays at its position, an entry the
+overlay adds goes to the end. To choose another order an overlay sets
+``data.sampler.arm_order`` explicitly.
+
 Overrides are ``dotted.path=value`` strings (value in YAML syntax) applied
 after the overlays, e.g. ``run.exp_dir=exp/trial``.
 

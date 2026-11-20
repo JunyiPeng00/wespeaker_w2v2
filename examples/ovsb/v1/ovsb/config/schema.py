@@ -6,6 +6,14 @@ the dotted path of the first unknown key, missing key, wrong type or
 out-of-range value. :func:`validate` adds the checks that span several
 fields (arm names, batch layout, layer counts).
 
+The order of ``data.sampler.arms`` and ``data.sampler.cells`` is behaviour:
+it sets the integer arm codes and the order of the stratification slots,
+hence the sampler's random stream. A :class:`Config` therefore carries the
+order as the lists ``arm_order`` / ``cell_order`` (compared by ``==``), and
+both mappings are kept in that order. In a hand-written file the order of
+the mapping is the order; a file that names ``arm_order`` is checked
+against its mapping, so a dump with sorted keys reads back unchanged.
+
 Fields that take a single value today (``stratify``, ``amp_dtype``, ...) are
 enumerations with one member: the recipe implements that one behaviour.
 """
@@ -108,7 +116,14 @@ class PolicyCfg:
 
 @dataclass
 class SamplerCfg:
-    """Episodic sampler: P speakers x K utterances per episode."""
+    """Episodic sampler: P speakers x K utterances per episode.
+
+    ``arm_order`` / ``cell_order`` list the names of ``arms`` / ``cells`` in
+    the order the sampler uses (arm code = position in ``arm_order``; the
+    stratification slots are the arms, then the cells). ``None`` on input
+    means the order of the mapping; a built config always has both lists.
+    The order of ``policies`` has no effect (they are looked up by arm).
+    """
     P: int = _f(ge=1)
     K: int = _f(ge=2)
     sample_num_per_epoch: int = _f(ge=1)
@@ -119,6 +134,8 @@ class SamplerCfg:
     forbid_same_segment: bool = _f()
     cells: Dict[str, CellCfg] = _f({})
     policies: Dict[str, PolicyCfg] = _f({})
+    arm_order: Optional[List[str]] = _f(None)
+    cell_order: Optional[List[str]] = _f(None)
 
 
 @dataclass
@@ -542,10 +559,48 @@ def scale_ratio(cfg: Config) -> float:
     return 1.0 * world_size(cfg) * cfg.data.loader.batch_size / LR_BASE_BATCH
 
 
+def _apply_order(mapping: Dict[str, Any], order: Optional[List[str]],
+                 path: str, what: str) -> List[str]:
+    """Put ``mapping`` in ``order`` (None = keep its own order)."""
+    if order is None:
+        return list(mapping)
+    if sorted(order) != sorted(mapping):
+        missing = [k for k in mapping if k not in order]
+        extra = [k for k in order if k not in mapping]
+        repeated = sorted({k for k in order if order.count(k) > 1})
+        raise ConfigError(
+            '%s: must list every entry of %s exactly once (not listed: %s; '
+            'not in %s: %s; repeated: %s). The order is behaviour (arm '
+            'codes, sampler random stream): name the position of a new '
+            'entry here' % (path, what, missing, what, extra, repeated))
+    items = dict(mapping)
+    mapping.clear()
+    mapping.update((key, items[key]) for key in order)
+    return list(order)
+
+
+def fix_order(cfg: Config) -> Config:
+    """Fill ``arm_order`` / ``cell_order`` and order the mappings by them."""
+    sampler = cfg.data.sampler
+    sampler.arm_order = _apply_order(
+        sampler.arms, sampler.arm_order, 'data.sampler.arm_order',
+        'data.sampler.arms')
+    sampler.cell_order = _apply_order(
+        sampler.cells, sampler.cell_order, 'data.sampler.cell_order',
+        'data.sampler.cells')
+    return cfg
+
+
 def validate(cfg: Config) -> Config:
     """Checks that span several fields. Returns ``cfg``."""
     run, data, model = cfg.run, cfg.data, cfg.model
     sampler, arms = data.sampler, data.sampler.arms
+    for name, mapping in (('arm', arms), ('cell', sampler.cells)):
+        if getattr(sampler, name + '_order') != list(mapping):
+            raise ConfigError(
+                'data.sampler.%s_order: %r is not the order of '
+                'data.sampler.%ss %r' % (name, getattr(
+                    sampler, name + '_order'), name, list(mapping)))
     if len(set(run.gpus)) != len(run.gpus):
         raise ConfigError('run.gpus: repeated entries in %r' % (run.gpus,))
     if run.num_avg > run.num_epochs:
@@ -641,4 +696,4 @@ def validate(cfg: Config) -> Config:
 
 def build_config(tree: Mapping[str, Any]) -> Config:
     """Mapping (parsed YAML) -> validated :class:`Config`."""
-    return validate(build_section(Config, tree, ''))
+    return validate(fix_order(build_section(Config, tree, '')))

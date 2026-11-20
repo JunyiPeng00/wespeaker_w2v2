@@ -51,6 +51,12 @@ PATH_FIELDS = (
 # at start-up; an unresolved conf/*.yaml of the original tree lacks them.
 RUNTIME_KEYS = ('train_label', 'noise_data', 'reverb_data')
 
+# The order the reference run used (its hand-written conf, its train log).
+ARM_ORDER = ['vox2', 'vb2', 'cn2', 'mandarin_t1', '3dspeaker', 'kespeech',
+             'tvx', 'cn1']
+CELL_ORDER = ['vb2_zh']
+AUTHORED_V9C = os.path.join(SOURCE_RECIPE, 'conf', 's3_base_v9c.yaml')
+
 OVERLAYS = {
     # overlay: (original conf, dotted paths that differ from stage2_v9c)
     'stage2_v8c1.yaml': ('s3_base_v8c1.yaml', {
@@ -172,6 +178,11 @@ def _diff(a, b):
     return {k for k in set(la) | set(lb) if la.get(k) != lb.get(k)}
 
 
+def _from_legacy(tree):
+    """from_legacy with the order of the reference run."""
+    return legacy.from_legacy(tree, arm_order=ARM_ORDER)
+
+
 def _base_tree():
     return cfg_load.read_tree(BASE)
 
@@ -214,9 +225,9 @@ def test_base_config_loads_and_round_trips():
     assert cfg.derived is None
     assert schema.build_config(cfg_load.to_dict(cfg)) == cfg
     assert schema.build_config(yaml.safe_load(cfg_load.dump(cfg))) == cfg
-    assert list(cfg.data.sampler.arms) == [
-        'vox2', 'vb2', 'cn2', 'mandarin_t1', '3dspeaker', 'kespeech', 'tvx',
-        'cn1']  # the arm order defines the arm index
+    assert cfg.data.sampler.arm_order == ARM_ORDER
+    assert list(cfg.data.sampler.arms) == ARM_ORDER
+    assert cfg.data.sampler.cell_order == CELL_ORDER
 
 
 def test_committed_configs_have_no_site_paths():
@@ -244,9 +255,15 @@ def test_config_package_needs_no_torch_or_numpy():
 # ------------------------------------------- (1) legacy import == clean yaml
 @source
 def test_legacy_v9c_equals_recipe_config():
-    old = legacy.from_legacy(_resolved_v9c())
+    old = legacy.load_legacy(RESOLVED_V9C, AUTHORED_V9C)
+    assert old == _from_legacy(_resolved_v9c())
     new = cfg_load.resolve(cfg_load.load(BASE),
                            num_class=old.derived.num_class)
+    assert old.data.sampler.arm_order == new.data.sampler.arm_order \
+        == ARM_ORDER
+    assert list(old.data.sampler.arms) == list(new.data.sampler.arms) \
+        == ARM_ORDER
+    assert old.data.sampler.cell_order == new.data.sampler.cell_order
     assert _normalised(old) == _normalised(new)
     # nothing but the declared path fields differs before normalisation
     differing = _diff(old, new)
@@ -271,7 +288,7 @@ def test_legacy_v9c_covers_every_legacy_leaf():
         broken = copy.deepcopy(tree)
         _set(broken, dotted + '_typo', 1)
         with pytest.raises(ConfigError, match='_typo'):
-            legacy.from_legacy(broken)
+            _from_legacy(broken)
         checked += 1
     assert checked > 150
 
@@ -282,10 +299,10 @@ def test_legacy_v9c_covers_every_legacy_leaf():
 def test_overlay_matches_original_conf(overlay):
     conf, expected = OVERLAYS[overlay]
     new = cfg_load.load(os.path.join(CONF, overlay))
-    old = legacy.from_legacy(_source_conf(conf))
+    old = _from_legacy(_source_conf(conf))
     assert _normalised(old) == _normalised(new)
     assert _diff(new, cfg_load.load(BASE)) == expected
-    old_base = legacy.from_legacy(_source_conf('s3_base_v9c.yaml'))
+    old_base = _from_legacy(_source_conf('s3_base_v9c.yaml'))
     old_diff = _diff(old, old_base)
     if overlay != 'cont_c40.yaml':
         assert old_diff == expected
@@ -347,6 +364,193 @@ def test_scientific_notation_without_dot_is_refused():
     with pytest.raises(ConfigError, match='optim.initial_lr: must be a '
                        'number'):
         cfg_load.load(BASE, ['optim.initial_lr=1e-5'])
+
+
+# --------------------------------------------------- arm order is behaviour
+def _reordered(tree, dotted, order):
+    mapping = _get(tree, dotted)
+    _set(tree, dotted, {key: mapping[key] for key in order})
+    return tree
+
+
+@pytest.mark.parametrize('name', ['stage2_v9c.yaml'] + sorted(OVERLAYS))
+def test_target_configs_use_the_reference_arm_order(name):
+    sampler = cfg_load.load(os.path.join(CONF, name)).data.sampler
+    assert sampler.arm_order == ARM_ORDER
+    assert list(sampler.arms) == ARM_ORDER
+    assert sampler.cell_order == list(sampler.cells) == CELL_ORDER
+    tree = cfg_load.to_dict(cfg_load.load(os.path.join(CONF, name)))
+    assert list(tree['data']['sampler']['arms']) == ARM_ORDER
+
+
+@source
+@pytest.mark.parametrize('name,conf', [('stage2_v9c.yaml',
+                                        's3_base_v9c.yaml')] +
+                         [(k, v[0]) for k, v in sorted(OVERLAYS.items())])
+def test_target_config_order_equals_the_authored_source_conf(name, conf):
+    authored = _read(os.path.join(SOURCE_RECIPE, 'conf', conf))
+    arm_order, cell_order = legacy.authored_order(authored)
+    assert arm_order == ARM_ORDER  # the constant is the authored order
+    sampler = cfg_load.load(os.path.join(CONF, name)).data.sampler
+    assert sampler.arm_order == arm_order
+    assert sampler.cell_order == cell_order
+
+
+def test_reordered_arms_compare_unequal():
+    base = cfg_load.load(BASE)
+    swapped = ARM_ORDER[:]
+    swapped[0], swapped[1] = swapped[1], swapped[0]
+    for order in (swapped, sorted(ARM_ORDER), ARM_ORDER[::-1]):
+        other = schema.build_config(
+            _reordered(_base_tree(), 'data.sampler.arms', order))
+        assert other.data.sampler.arm_order == order
+        assert other.data.sampler.arms == base.data.sampler.arms  # as sets
+        assert other != base
+        assert other.data.sampler != base.data.sampler
+        assert cfg_load.to_dict(other)['data']['sampler']['arm_order'] != \
+            cfg_load.to_dict(base)['data']['sampler']['arm_order']
+        assert _diff(other, base) == {'data.sampler.arm_order'}
+    # the order of policies / per-arm tables has no effect and no field
+    same = schema.build_config(_reordered(
+        _base_tree(), 'data.sampler.policies',
+        sorted(base.data.sampler.policies)))
+    assert same == base
+
+
+def test_reordered_cells_compare_unequal():
+    tree = _base_tree()
+    tree['data']['sampler']['cells']['vb2_en'] = {
+        'arm': 'vb2', 'share': 0.01, 'select': {'spk2lang': 'en'}}
+    first = schema.build_config(copy.deepcopy(tree))
+    assert first.data.sampler.cell_order == ['vb2_zh', 'vb2_en']
+    second = schema.build_config(_reordered(
+        tree, 'data.sampler.cells', ['vb2_en', 'vb2_zh']))
+    assert second.data.sampler.cell_order == ['vb2_en', 'vb2_zh']
+    assert first != second
+
+
+def test_explicit_arm_order_is_checked_and_applied():
+    tree = _base_tree()
+    tree['data']['sampler']['arm_order'] = ARM_ORDER[::-1]
+    cfg = schema.build_config(tree)
+    assert cfg.data.sampler.arm_order == list(cfg.data.sampler.arms) \
+        == ARM_ORDER[::-1]
+    for bad in (ARM_ORDER[:-1], ARM_ORDER + ['cn3'],
+                ARM_ORDER[:-1] + ['vox2']):
+        tree = _base_tree()
+        tree['data']['sampler']['arm_order'] = bad
+        with pytest.raises(ConfigError, match='^data.sampler.arm_order: must '
+                           'list every entry of data.sampler.arms exactly '
+                           'once'):
+            schema.build_config(tree)
+    tree = _base_tree()
+    tree['data']['sampler']['cell_order'] = ['nope']
+    with pytest.raises(ConfigError, match='^data.sampler.cell_order'):
+        schema.build_config(tree)
+    # a Config edited in place cannot disagree with its order
+    cfg = cfg_load.load(BASE)
+    cfg.data.sampler.arm_order = sorted(ARM_ORDER)
+    with pytest.raises(ConfigError, match='^data.sampler.arm_order: .* is '
+                       'not the order of data.sampler.arms'):
+        schema.validate(cfg)
+
+
+def test_order_survives_a_dump_with_sorted_keys():
+    cfg = cfg_load.resolve(cfg_load.load(BASE), num_class=5)
+    for sort_keys in (False, True):
+        text = yaml.safe_dump(cfg_load.to_dict(cfg), sort_keys=sort_keys)
+        back = schema.build_config(yaml.safe_load(text))
+        assert back == cfg
+        assert list(back.data.sampler.arms) == ARM_ORDER
+    assert schema.build_config(yaml.safe_load(cfg_load.dump(cfg))) == cfg
+    assert 'arm_order' in cfg_load.dump(cfg)
+
+
+def test_overlay_cannot_reorder_arms_silently(tmp_path):
+    base = tmp_path / 'base.yaml'
+    base.write_text(open(BASE).read())
+    over = tmp_path / 'over.yaml'
+    # written in another order, one arm changed, one arm added
+    over.write_text(
+        'base: base.yaml\n'
+        'data:\n'
+        '  sampler:\n'
+        '    arms:\n'
+        '      new: {weight: 0.05, corpus: [new]}\n'
+        '      cn1: {weight: 0.2, corpus: [cn1, cn1x]}\n'
+        '      vox2: {weight: 0.1184}\n')
+    cfg = cfg_load.load(str(over))
+    assert cfg.data.sampler.arm_order == ARM_ORDER + ['new']
+    assert list(cfg.data.sampler.arms) == ARM_ORDER + ['new']
+    assert cfg.data.sampler.arms['cn1'].corpus == ['cn1', 'cn1x']
+    # --set behaves the same
+    cfg = cfg_load.load(BASE, ['data.sampler.arms.cn2.weight=0.2',
+                               'data.sampler.arms.zz={weight: 0.1, '
+                               'corpus: [zz]}'])
+    assert cfg.data.sampler.arm_order == ARM_ORDER + ['zz']
+    # reordering is possible only by naming the order
+    over.write_text('base: base.yaml\ndata:\n  sampler:\n    arm_order: %s\n'
+                    % sorted(ARM_ORDER))
+    assert cfg_load.load(str(over)).data.sampler.arm_order == \
+        sorted(ARM_ORDER)
+    # a base that names its order (a printed config) refuses an unplaced arm
+    base.write_text(cfg_load.dump(cfg_load.load(BASE)))
+    over.write_text('base: base.yaml\ndata:\n  sampler:\n    arms:\n'
+                    '      new: {weight: 0.05, corpus: [new]}\n')
+    with pytest.raises(ConfigError, match=r"^data.sampler.arm_order: .*not "
+                       r"listed: \['new'\]"):
+        cfg_load.load(str(over))
+
+
+@source
+def test_from_legacy_never_takes_the_order_of_its_input():
+    tree = _resolved_v9c()
+    saved_order = list(tree['dataset_args']['episodic_sampler']['arms'])
+    assert saved_order == sorted(ARM_ORDER) != ARM_ORDER  # dumped sorted
+    with pytest.raises(ConfigError) as err:
+        legacy.from_legacy(tree)
+    text = str(err.value)
+    assert 'dataset_args.episodic_sampler.arms: the order of these 8' in text
+    assert 'sorted on dump' in text and 'load_legacy' in text
+    # also refused for a hand-written conf: the caller states the order
+    with pytest.raises(ConfigError, match='the order of these 8'):
+        legacy.from_legacy(_source_conf('s3_base_v9c.yaml'))
+    reference = legacy.from_legacy(tree, arm_order=ARM_ORDER)
+    assert reference.data.sampler.arm_order == ARM_ORDER
+    assert list(reference.data.sampler.arms) == ARM_ORDER
+    assert reference == legacy.from_legacy(tree, ARM_ORDER, CELL_ORDER)
+    alphabetical = legacy.from_legacy(tree, arm_order=saved_order)
+    assert alphabetical != reference
+    new = cfg_load.resolve(cfg_load.load(BASE), num_class=152367)
+    assert _normalised(alphabetical) != _normalised(new)
+    assert _normalised(reference) == _normalised(new)
+    for bad in (ARM_ORDER[:-1], ARM_ORDER + ['x'], ['vox2'] * 8):
+        with pytest.raises(ConfigError, match='the given order .* is not a '
+                           'permutation'):
+            legacy.from_legacy(tree, arm_order=bad)
+    with pytest.raises(ConfigError, match='episodic_sampler.cells: the given '
+                       'order'):
+        legacy.from_legacy(tree, arm_order=ARM_ORDER, cell_order=['x'])
+
+
+@source
+def test_load_legacy_takes_the_order_from_the_authored_conf(tmp_path):
+    cfg = legacy.load_legacy(RESOLVED_V9C, AUTHORED_V9C)
+    assert cfg.data.sampler.arm_order == ARM_ORDER
+    assert cfg.derived.num_class == 152367
+    conf = os.path.join(SOURCE_RECIPE, 'conf')
+    # the conf of another run (other arm weights) is refused
+    with pytest.raises(ConfigError, match='episodic_sampler.arms differs '
+                       r"from the saved config .* at \['cn1', 'cn2', 'vb2'\]"):
+        legacy.load_legacy(RESOLVED_V9C,
+                           os.path.join(conf, 's3_base_v8c1.yaml'))
+    # same arms in the same order: accepted (v9b differs in num_epochs only)
+    assert legacy.load_legacy(
+        RESOLVED_V9C, os.path.join(conf, 's3_base_v9b.yaml')) == cfg
+    empty = tmp_path / 'empty.yaml'
+    empty.write_text('seed: 1\n')
+    with pytest.raises(ConfigError, match='authored conf: no dataset_args'):
+        legacy.load_legacy(RESOLVED_V9C, str(empty))
 
 
 # ------------------------------------------- (3) errors name the dotted path
@@ -500,10 +704,10 @@ def test_legacy_refuses_closed_key(conf, dotted):
     value = _get(donor, concrete)
     assert value not in (None, False, 0, {}, [])
     tree = _resolved_v9c()
-    legacy.from_legacy(tree)  # accepted before the transplant
+    _from_legacy(tree)  # accepted before the transplant
     _set(tree, concrete, copy.deepcopy(value))
     with pytest.raises(ConfigError) as err:
-        legacy.from_legacy(tree)
+        _from_legacy(tree)
     lines = [line.strip() for line in str(err.value).splitlines()]
     assert any(line.startswith(concrete + ': closed-experiment key is set')
                for line in lines), str(err.value)
@@ -514,8 +718,11 @@ def test_legacy_refuses_closed_key(conf, dotted):
 def test_legacy_refuses_closed_experiment_conf(conf):
     donor = _read(os.path.join(SOURCE_RECIPE, 'conf', conf))
     wanted = [_expand(donor, d) for c, d in CLOSED_EXAMPLES if c == conf]
+    tree = _source_conf(conf)
+    sampler = tree['dataset_args'].get('episodic_sampler') or {}
     with pytest.raises(ConfigError) as err:
-        legacy.from_legacy(_source_conf(conf))
+        legacy.from_legacy(tree, arm_order=list(sampler.get('arms') or {}),
+                           cell_order=list(sampler.get('cells') or {}))
     for concrete in wanted:
         assert concrete + ': closed-experiment key is set' in str(err.value)
 
@@ -552,7 +759,7 @@ def test_legacy_refuses_closed_key_synthetic(dotted, value):
     _set(tree, dotted, value)
     with pytest.raises(ConfigError, match=dotted.replace('.', r'\.')
                        + ': closed-experiment key is set'):
-        legacy.from_legacy(tree)
+        _from_legacy(tree)
 
 
 @source
@@ -565,9 +772,9 @@ def test_legacy_refuses_closed_key_synthetic(dotted, value):
     ('grad_norm_adam', {'enable': False})])
 def test_legacy_accepts_closed_key_at_its_off_value(dotted, value):
     tree = _resolved_v9c()
-    reference = legacy.from_legacy(tree)
+    reference = _from_legacy(tree)
     _set(tree, dotted, value)
-    assert legacy.from_legacy(tree) == reference
+    assert _from_legacy(tree) == reference
 
 
 @source
@@ -589,7 +796,7 @@ def test_legacy_refuses_unsupported_fixed_value(dotted, value):
     _set(tree, dotted, value)
     with pytest.raises(ConfigError, match=dotted.replace('.', r'\.')
                        + ': .* is not supported by the recipe'):
-        legacy.from_legacy(tree)
+        _from_legacy(tree)
 
 
 @source
@@ -600,7 +807,7 @@ def test_legacy_reports_every_problem_at_once():
     del tree['seed']
     tree['margin_update']['final_margin'] = 0.3
     with pytest.raises(ConfigError) as err:
-        legacy.from_legacy(tree)
+        _from_legacy(tree)
     text = str(err.value)
     assert '4 problems' in text
     for part in ('grpo: closed-experiment key is set',
@@ -672,7 +879,7 @@ def test_core_view_is_accepted_by_the_stock_extraction_reader():
 @source
 def test_core_view_equals_the_legacy_values():
     tree = _resolved_v9c()
-    core = core_view.to_core_dict(legacy.from_legacy(tree))
+    core = core_view.to_core_dict(_from_legacy(tree))
     assert core['model'] == tree['model']
     assert core['model_args'] == tree['model_args']
     old_ds, new_ds = tree['dataset_args'], core['dataset_args']
@@ -732,7 +939,7 @@ def test_resolve_errors(tmp_path):
 @source
 def test_legacy_derived_values_are_validated():
     tree = _resolved_v9c()
-    cfg = legacy.from_legacy(tree)
+    cfg = _from_legacy(tree)
     assert cfg.derived == schema.DerivedCfg(
         epoch_iter=3645, scale_ratio=6.0, num_class=152367)
     assert cfg.derived.epoch_iter == tree['scheduler_args']['epoch_iter'] \
@@ -747,14 +954,14 @@ def test_legacy_derived_values_are_validated():
         broken = copy.deepcopy(tree)
         _set(broken, dotted, value)
         with pytest.raises(ConfigError, match=dotted.replace('.', r'\.')):
-            legacy.from_legacy(broken)
+            _from_legacy(broken)
     # a different process count changes both derived values
     broken = copy.deepcopy(tree)
     broken['gpus'] = [0, 1, 2, 3]
     with pytest.raises(ConfigError, match='scheduler_args.epoch_iter: 3645 '
                        'does not match the value 7291'):
-        legacy.from_legacy(broken)
-    unresolved = legacy.from_legacy(_source_conf('s3_base_v9c.yaml'))
+        _from_legacy(broken)
+    unresolved = _from_legacy(_source_conf('s3_base_v9c.yaml'))
     assert unresolved.derived is None
     assert cfg_load.resolve(unresolved, num_class=152367).derived == \
         cfg.derived
@@ -785,3 +992,12 @@ def test_validate_config_cli(capsys):
     assert 'time_mask' not in capsys.readouterr().out
     assert validate_config.main([BASE, '--set', 'run.sed=1']) == 2
     assert 'run.sed: unknown key' in capsys.readouterr().err
+
+
+@source
+def test_validate_config_cli_legacy(capsys):
+    from ovsb.bin import validate_config
+    assert validate_config.main([RESOLVED_V9C, '--legacy', AUTHORED_V9C]) == 0
+    out = yaml.safe_load(capsys.readouterr().out)
+    assert out['data']['sampler']['arm_order'] == ARM_ORDER
+    assert list(out['data']['sampler']['arms']) == ARM_ORDER

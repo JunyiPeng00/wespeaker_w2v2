@@ -12,14 +12,24 @@ legacy key falls in one of four classes, declared per mapping below:
 A key in none of the classes is refused as unknown. All problems are
 collected and reported in one :class:`ConfigError`, each with the dotted
 path of the legacy key.
+
+Arm order. The order of ``episodic_sampler.arms`` sets the arm codes and
+the sampler's random stream, but the ``config.yaml`` the original trainer
+saves is dumped with sorted keys, so its arms are alphabetical whatever
+order the run used. :func:`from_legacy` therefore never takes the order
+from its input: the caller passes ``arm_order``. The order a run used is
+the one of the hand-written conf it was launched with;
+:func:`load_legacy` reads a saved config together with that conf.
 """
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Sequence,
+                    Tuple, Union)
 
 import yaml
 
 from ovsb.config import schema
 from ovsb.config.core_view import FRAME_MS, FRONTEND
+from ovsb.config.load import read_yaml
 from ovsb.config.schema import Config, ConfigError
 
 Accept = Union[Tuple[Any, ...], Callable[[Any], bool]]
@@ -505,8 +515,48 @@ def _raise(problems: List[str]) -> None:
             '\n  '.join(problems)))
 
 
-def from_legacy(tree: Mapping[str, Any]) -> Config:
+def _order(given: Optional[Sequence[str]], names: List[str], path: str,
+           problems: List[str]) -> Optional[List[str]]:
+    """Check a caller-supplied order against the names of a mapping."""
+    if given is None:
+        if len(names) > 1:
+            problems.append(
+                '%s: the order of these %d entries is behaviour (arm codes, '
+                'sampler random stream) and cannot be read from a saved '
+                'config, whose keys are sorted on dump. Pass it explicitly '
+                '(from_legacy(..., arm_order=..., cell_order=...)) or use '
+                'load_legacy(saved config, hand-written conf)' %
+                (path, len(names)))
+            return None
+        return list(names)
+    given = [given] if isinstance(given, str) else list(given)
+    if sorted(map(str, given)) != sorted(names):
+        problems.append('%s: the given order %r is not a permutation of the '
+                        'entries %r' % (path, given, sorted(names)))
+        return None
+    return given
+
+
+def authored_order(conf: Mapping[str, Any]) -> Tuple[List[str], List[str]]:
+    """(arm order, cell order) of a hand-written wespeaker-schema conf."""
+    try:
+        sampler = conf['dataset_args']['episodic_sampler']
+        return list(sampler['arms']), list(sampler.get('cells') or {})
+    except (KeyError, TypeError) as exc:
+        raise ConfigError('authored conf: no dataset_args.episodic_sampler.'
+                          'arms mapping (%s)' % exc) from exc
+
+
+def from_legacy(tree: Mapping[str, Any],
+                arm_order: Optional[Sequence[str]] = None,
+                cell_order: Optional[Sequence[str]] = None) -> Config:
     """Resolved wespeaker-schema training config -> :class:`Config`.
+
+    arm_order: the arm names in the order the run used; required as soon
+        as there is more than one arm (see the module docstring: the order
+        of ``tree`` is never trusted).
+    cell_order: the same for ``episodic_sampler.cells``; required for more
+        than one cell.
 
     ``derived`` is filled when the config carries the class count
     (``projection_args.num_class``), as a config saved by the trainer does.
@@ -539,6 +589,12 @@ def from_legacy(tree: Mapping[str, Any]) -> Config:
             'save_optimizer_state': top.get('save_optimizer_state'),
         },
     }
+    sampler = new['data']['sampler']
+    where = 'dataset_args.episodic_sampler.'
+    sampler['arm_order'] = _order(arm_order, list(sampler['arms']),
+                                  where + 'arms', problems)
+    sampler['cell_order'] = _order(cell_order, list(sampler['cells']),
+                                   where + 'cells', problems)
     ddp.done()
     ds.done(fixed=DATASET_FIXED, ignored=DATASET_IGNORED,
             closed=DATASET_CLOSED)
@@ -554,3 +610,28 @@ def from_legacy(tree: Mapping[str, Any]) -> Config:
         new['derived'] = derived
         cfg = schema.build_config(new)
     return cfg
+
+
+def load_legacy(saved: str, authored: str) -> Config:
+    """A saved run config plus the conf the run was launched with.
+
+    saved: ``<exp_dir>/config.yaml`` written by the original trainer (all
+        values, keys sorted). authored: the hand-written ``conf/*.yaml`` of
+        that run; only the order of its arms and cells is taken from it,
+        and its arms and cells must be the ones of ``saved``.
+    """
+    tree, conf = read_yaml(saved), read_yaml(authored)
+    arm_order, cell_order = authored_order(conf)
+    old = (tree.get('dataset_args') or {}).get('episodic_sampler') or {}
+    new = conf['dataset_args']['episodic_sampler']
+    for key in ('arms', 'cells'):
+        mine, theirs = old.get(key) or {}, new.get(key) or {}
+        if dict(mine) != dict(theirs):
+            differ = sorted(k for k in set(mine) | set(theirs)
+                            if mine.get(k) != theirs.get(k))
+            raise ConfigError(
+                'authored conf %s: dataset_args.episodic_sampler.%s differs '
+                'from the saved config %s at %s; it is not the conf of this '
+                'run, so its order cannot be used' %
+                (authored, key, saved, differ))
+    return from_legacy(tree, arm_order=arm_order, cell_order=cell_order)

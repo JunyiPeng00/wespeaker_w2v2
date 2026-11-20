@@ -72,8 +72,18 @@ python -m ovsb.bin.validate_config conf/stage2_v9c.yaml --set run.seed=1
 * Derived values (`derived.epoch_iter`, `derived.scale_ratio`,
   `derived.num_class`) are computed from the config and the training list
   (`--resolve`), never written by hand.
-* `--legacy` reads a resolved config of the original wespeaker-schema
-  training setup and refuses any option this recipe does not implement.
+* The order of `data.sampler.arms` (and `cells`) is behaviour: it sets the
+  arm codes and the sampler's random stream. In a hand-written file the
+  order of the mapping is the order; an overlay keeps the position of an
+  arm it changes and appends an arm it adds. A loaded config carries the
+  order as `data.sampler.arm_order` / `cell_order`, and a printed config
+  names them, so it reads back in the same order however its keys are
+  sorted.
+* `<exp_dir>/config.yaml --legacy <authored conf>` reads a config saved by
+  the original wespeaker-schema trainer and refuses any option this recipe
+  does not implement. The saved file has sorted keys, so the arm order is
+  taken from the hand-written conf of that run
+  (`ovsb.config.load_legacy(saved, authored)`).
 
 ## Tests
 

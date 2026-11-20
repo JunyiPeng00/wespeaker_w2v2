@@ -13,10 +13,10 @@ overlays, overrides, derived values), ``legacy`` (``from_legacy``),
 """
 
 from ovsb.config.core_view import to_core_dict
-from ovsb.config.legacy import from_legacy
+from ovsb.config.legacy import from_legacy, load_legacy
 from ovsb.config.load import load as load_config
 from ovsb.config.load import resolve, to_dict
 from ovsb.config.schema import Config, ConfigError
 
-__all__ = ['Config', 'ConfigError', 'from_legacy', 'load_config', 'resolve',
-           'to_core_dict', 'to_dict']
+__all__ = ['Config', 'ConfigError', 'from_legacy', 'load_config',
+           'load_legacy', 'resolve', 'to_core_dict', 'to_dict']
