@@ -1,0 +1,3 @@
+# the python package ovsb/data is source code, not a data directory
+!/ovsb/data/
+__pycache__/
