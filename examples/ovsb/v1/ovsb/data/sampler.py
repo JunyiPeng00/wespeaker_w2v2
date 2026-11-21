@@ -27,6 +27,14 @@ Cells
     and the split changes every epoch. All draws of a cell come from one
     generator keyed ``(seed, e, r, w)``.
 
+    Rank-split arms (``rank_split_arms``, default none): the speakers of a
+    listed arm are split over the ranks only. Every worker of rank r draws
+    them from the union of the cells of rank r, each worker with its own
+    cycle. They stay exclusive across the ranks of a step; a batch comes
+    from one worker, so it never holds a speaker of such an arm twice as
+    long as the arm has enough speakers per rank. Meant for a small arm
+    with a large weight (see the known limitation below).
+
 Slots and quotas
     The speakers of a cell are grouped by arm. A *share cell* (a named
     subset of one arm, e.g. the speakers of one language) is split off into
@@ -228,6 +236,9 @@ class EpisodicSampler(IterableDataset):
             'systematic' is implemented.
         log_every: episodes between stat lines of worker 0 of every rank
             (0 = no stat lines at all).
+        rank_split_arms: names of the arms whose speakers are split over
+            the ranks only (module doc); empty = every arm is split over
+            the cells.
         log_at_end: also emit the stat lines once when a worker's stream is
             closed (the end of its epoch), for every worker. With
             ``log_every`` larger than the episodes a worker delivers per
@@ -242,7 +253,8 @@ class EpisodicSampler(IterableDataset):
     def __init__(self, table: SpeakerTable, weights: SpeakerWeights, P: int,
                  K: int, sample_num_per_epoch: int = 0, seed: int = 0,
                  stratify: str = 'systematic', log_every: int = 200,
-                 log_at_end: bool = True) -> None:
+                 log_at_end: bool = True,
+                 rank_split_arms: Sequence[str] = ()) -> None:
         if int(K) != table.K:
             raise ValueError('K %d differs from the table K %d' % (K, table.K))
         if stratify != 'systematic':
@@ -250,6 +262,14 @@ class EpisodicSampler(IterableDataset):
                              % (stratify, ))
         if int(P) < 1:
             raise ValueError('P must be >= 1, got %r' % (P, ))
+        unknown = [a for a in rank_split_arms if a not in table.arm_names]
+        if unknown:
+            raise ValueError('rank_split_arms %s are not arms %s' % (
+                unknown, list(table.arm_names)))
+        self.rank_split_arms = tuple(rank_split_arms)
+        self._rank_split = np.array(
+            [table.arm_names.index(a) for a in self.rank_split_arms],
+            np.int64)
         self.table = table
         self.weights = weights
         self.P, self.K = int(P), int(K)
@@ -313,11 +333,22 @@ class EpisodicSampler(IterableDataset):
         """Sorted speaker ids of cell (rank, worker) in ``epoch``.
 
         Includes speakers without an arm; the episode stream drops them.
+        The speakers of a rank-split arm are those of all cells of the
+        rank.
         """
         n_cells = world * nw
         perm = np.random.default_rng(self._key(epoch, 7)).permutation(
             self.table.n_spk)
-        return np.sort(perm[(rank * nw + wid)::n_cells])
+        cell = perm[(rank * nw + wid)::n_cells]
+        if len(self._rank_split):
+            spk_arm = self.table.spk_arm
+            cell = cell[~np.isin(spk_arm[cell], self._rank_split)]
+            # positions of the cells of this rank in the round-robin deal
+            of_rank = (np.arange(len(perm)) % n_cells) // nw == rank
+            mine = perm[of_rank]
+            cell = np.concatenate(
+                [cell, mine[np.isin(spk_arm[mine], self._rank_split)]])
+        return np.sort(cell)
 
     def episodes_per_worker(self, world: int, nw: int) -> int:
         """Upper bound of the episodes one worker delivers per epoch.

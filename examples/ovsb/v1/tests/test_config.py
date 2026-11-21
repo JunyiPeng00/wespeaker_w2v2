@@ -1001,3 +1001,20 @@ def test_validate_config_cli_legacy(capsys):
     out = yaml.safe_load(capsys.readouterr().out)
     assert out['data']['sampler']['arm_order'] == ARM_ORDER
     assert list(out['data']['sampler']['arms']) == ARM_ORDER
+
+
+def test_rank_split_arms_default_and_check():
+    assert cfg_load.load(BASE).data.sampler.rank_split_arms == []
+    tree = _base_tree()
+    tree['data']['sampler']['rank_split_arms'] = ['cn1']
+    assert schema.build_config(tree).data.sampler.rank_split_arms == ['cn1']
+    for bad in (['nope'], ['cn1', 'cn1']):
+        tree = _base_tree()
+        tree['data']['sampler']['rank_split_arms'] = bad
+        with pytest.raises(ConfigError,
+                           match='^data.sampler.rank_split_arms'):
+            schema.build_config(tree)
+    split = cfg_load.load(os.path.join(CONF, 'cont_c40_ranksplit.yaml'))
+    c40 = cfg_load.load(os.path.join(CONF, 'cont_c40.yaml'))
+    assert _diff(split, c40) == {'run.exp_dir',
+                                 'data.sampler.rank_split_arms'}

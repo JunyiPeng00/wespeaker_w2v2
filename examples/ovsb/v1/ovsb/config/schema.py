@@ -123,6 +123,11 @@ class SamplerCfg:
     stratification slots are the arms, then the cells). ``None`` on input
     means the order of the mapping; a built config always has both lists.
     The order of ``policies`` has no effect (they are looked up by arm).
+
+    ``rank_split_arms``: arms whose speakers are split over the ranks only
+    instead of over every (rank, worker) cell; for a small arm with a large
+    weight, whose cells would otherwise hold fewer speakers than its
+    per-episode quota.
     """
     P: int = _f(ge=1)
     K: int = _f(ge=2)
@@ -136,6 +141,7 @@ class SamplerCfg:
     policies: Dict[str, PolicyCfg] = _f({})
     arm_order: Optional[List[str]] = _f(None)
     cell_order: Optional[List[str]] = _f(None)
+    rank_split_arms: List[str] = _f([])
 
 
 @dataclass
@@ -624,6 +630,10 @@ def validate(cfg: Config) -> Config:
                 '%s.share: %g must be below the normalised weight %g of arm '
                 '%s' % (path, cell.share, arms[cell.arm].weight / total,
                         cell.arm))
+    _need_arms(sampler.rank_split_arms, arms, 'data.sampler.rank_split_arms')
+    if len(set(sampler.rank_split_arms)) != len(sampler.rank_split_arms):
+        raise ConfigError('data.sampler.rank_split_arms: repeated entries '
+                          'in %r' % (sampler.rank_split_arms,))
     _need_arms(sampler.policies, arms, 'data.sampler.policies')
     for name, pol in sampler.policies.items():
         path = 'data.sampler.policies.%s' % name

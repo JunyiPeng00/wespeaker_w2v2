@@ -146,7 +146,8 @@ def sampler_from_config(cfg: Config, table: SpeakerTable) -> EpisodicSampler:
         table, build_weights(table), sampler.P, sampler.K,
         sample_num_per_epoch=sampler.sample_num_per_epoch,
         seed=cfg.run.seed, stratify=sampler.stratify,
-        log_every=sampler.log_every)
+        log_every=sampler.log_every,
+        rank_split_arms=sampler.rank_split_arms)
 
 
 class TrainDataset(IterableDataset):

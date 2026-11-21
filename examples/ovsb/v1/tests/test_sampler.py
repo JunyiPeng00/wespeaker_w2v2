@@ -215,6 +215,65 @@ def test_workers_draw_only_from_their_cell(toy):
         assert not a & b
 
 
+def test_rank_split_arm_is_shared_by_the_workers_of_a_rank(toy):
+    """A rank-split arm: every worker of a rank holds the arm's speakers of
+    all cells of the rank; other arms and the default are untouched."""
+    plain = make_sampler(toy)
+    t = plain.table
+    name = t.arm_names[int(np.bincount(t.spk_arm[t.spk_arm >= 0]).argmax())]
+    a = arm_id(t, name)
+    S = make_sampler(toy, rank_split_arms=[name])
+    assert S.rank_split_arms == (name, )
+    per_rank = []
+    for r in range(2):
+        old = [plain.cell_speakers(1, r, 2, w, 3) for w in range(3)]
+        new = [S.cell_speakers(1, r, 2, w, 3) for w in range(3)]
+        union = np.concatenate(old)
+        want = np.sort(union[t.spk_arm[union] == a])
+        assert len(want) > max(int((t.spk_arm[c] == a).sum()) for c in old)
+        for o, n in zip(old, new):
+            assert (np.diff(n) > 0).all()
+            assert np.array_equal(n[t.spk_arm[n] == a], want)
+            assert np.array_equal(n[t.spk_arm[n] != a], o[t.spk_arm[o] != a])
+        per_rank.append(set(want.tolist()))
+        # the draws of the arm stay inside the rank, other arms in the cell
+        for w in range(3):
+            for arm, s, _, _ in groups(S, 40, 1, r, 2, w, 3):
+                if arm == name:
+                    assert s in per_rank[-1]
+                else:
+                    assert s in set(old[w].tolist())
+    assert not per_rank[0] & per_rank[1]
+    assert len(per_rank[0] | per_rank[1]) == int((t.spk_arm == a).sum())
+    # one rank, one worker: nothing to share, the stream is the default one
+    cell = (1, 0, 1, 0, 1, 20)
+    assert digest(stream(S, cell)) == digest(stream(plain, cell))
+    with pytest.raises(ValueError, match='rank_split_arms'):
+        make_sampler(toy, rank_split_arms=['nope'])
+
+
+def test_rank_split_removes_the_repeats_of_a_small_arm(toy):
+    """The repeats of small cells shrink for a rank-split arm: the rank
+    holds more speakers of the arm than any of its cells."""
+    ep = variant(toy, P=40)
+
+    def repeats(S):
+        total = np.zeros(len(S.table.arm_names), np.int64)
+        for r in range(2):
+            for w in range(3):
+                list(S.iter_episodes(1, r, 2, w, 3, 60))
+                total += S.stats.repeat_speakers
+        return total
+
+    plain = make_sampler(toy, ep)
+    before = repeats(plain)
+    worst = int(before.argmax())
+    assert before[worst] > 0
+    after = repeats(make_sampler(
+        toy, ep, rank_split_arms=[plain.table.arm_names[worst]]))
+    assert after[worst] < before[worst]
+
+
 # ----------------------------------------------------------------------------
 # episodes
 

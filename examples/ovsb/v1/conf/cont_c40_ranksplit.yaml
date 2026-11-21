@@ -1,0 +1,11 @@
+# cont_c40 with the cn1 speakers split over the ranks only: at a weight of
+# 0.40 the per-episode quota of cn1 exceeds the cn1 speakers of a
+# (rank, worker) cell, so cont_c40 repeats cn1 speakers inside an episode.
+base: cont_c40.yaml
+
+run:
+  exp_dir: exp/cont_c40_ranksplit
+
+data:
+  sampler:
+    rank_split_arms: [cn1]
