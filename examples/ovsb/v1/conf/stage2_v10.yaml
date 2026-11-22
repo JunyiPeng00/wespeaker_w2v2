@@ -1,0 +1,16 @@
+# stage2_v9c with the cn1 arm at 40 % of the draws (0.05 each taken from
+# vox2, vb2 and 3dspeaker) and the cn1 speakers split over the ranks only,
+# so that no cn1 speaker is repeated inside an episode.
+base: stage2_v9c.yaml
+
+run:
+  exp_dir: exp/stage2_v10
+
+data:
+  sampler:
+    rank_split_arms: [cn1]
+    arms:
+      vox2: {weight: 0.1184}
+      vb2: {weight: 0.1339}
+      3dspeaker: {weight: 0.0989}
+      cn1: {weight: 0.40}

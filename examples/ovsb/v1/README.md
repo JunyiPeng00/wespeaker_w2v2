@@ -55,8 +55,9 @@ conf/          recipe configs
   stage2_v9c.yaml      the reference stage-2 config
   stage2_v8c1.yaml, stage2_v9a.yaml, stage2_v9b.yaml, cont_c40.yaml
                        overlays of stage2_v9c.yaml (only the keys that differ)
-  cont_c40_ranksplit.yaml
-                       cont_c40.yaml with `data.sampler.rank_split_arms: [cn1]`
+  cont_c40_ranksplit.yaml, stage2_v10.yaml
+                       cont_c40.yaml / stage2_v9c.yaml (cn1 at 40 %) with
+                       `data.sampler.rank_split_arms: [cn1]`
 ovsb/          the recipe package
   config/      typed config: schema, YAML + overlays, legacy import, core view
   data/        index, speaker table, sampler, crop, augmentation, collate
